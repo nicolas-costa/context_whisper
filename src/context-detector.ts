@@ -337,7 +337,9 @@ function detectFromPath(cwd: string): Partial<DetectedContext> {
   }
 
   return {
-    workspace: workspaceDir ? normalize(workspaceDir) : 'default',
+    // We no longer treat workspace as a meaningful global config; it should come from repo_url when available.
+    // When we cannot infer it, keep an explicit placeholder instead of silently defaulting to "default".
+    workspace: workspaceDir ? normalize(workspaceDir) : 'unknown',
     project: normalize(currentDir),
     confidence: projectDir ? 0.75 : confidence, // Higher confidence if we found actual project
     inferred: true,
@@ -447,11 +449,6 @@ export function detectContext(
   }
 
   // 2. ENV variables
-  if (env.CONTEXT_WHISPER_WORKSPACE) {
-    context.workspace = env.CONTEXT_WHISPER_WORKSPACE;
-    context.confidence = 0.85;
-    context.source = 'env';
-  }
   if (env.CONTEXT_WHISPER_PROJECT) {
     context.project = env.CONTEXT_WHISPER_PROJECT;
     context.confidence = 0.85;

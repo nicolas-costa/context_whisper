@@ -16,7 +16,7 @@ const cwd = args[1] || process.cwd();
 const vecLibPath = process.env.CONTEXT_WHISPER_VEC_LIB;
 
 // Initialize DB
-const config = resolveConfig(dbPath, undefined, vecLibPath);
+const config = resolveConfig(dbPath, vecLibPath);
 const db = openDB(config.dbPath, config.vecLibPath);
 
 const PUBLIC_DIR = path.join(__dirname, 'public');

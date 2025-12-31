@@ -28,7 +28,7 @@ npm run build
 ### Via npx
 
 ```bash
-npx context-whisper --workspace personal
+npx context-whisper
 ```
 
 ### Desenvolvimento
@@ -40,7 +40,6 @@ npm run dev
 ### Opções CLI
 
 - `--db <path>`: Caminho para o arquivo SQLite (padrão: ~/.local/share/context-whisper/meta.sqlite no Linux)
-- `--workspace <name>`: Nome do workspace (padrão: 'default')
 - `--vec-lib <path>`: Caminho para a extensão sqlite-vec
 
 ### Variáveis de Ambiente

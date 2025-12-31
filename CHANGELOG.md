@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.0] - 2025-12-31
+
+### Added
+- **Web UI editing**: Edit note `topic`, `subtopic`, and `review_status` directly in the browser header (with Save button).
+
+### Changed
+- **Workspace derivation**: Removed `--workspace` override; workspace is derived from git remote `repo_url` (no silent "default").
+
+### Fixed
+- **Web UI API contract**: `/api/topics`, `/api/search`, and `/api/note` return a consistent `{ ok: true|false, ... }` payload (UI no longer ignores successful responses).
+- **Global search note navigation**: Clicking results from “Search all projects” loads the correct note by passing `workspace/project` to `/api/note`.
+- **Web UI readability**: Note content uses an explicit light background (no dark-theme bleed-through).
+
 ## [1.2.0] - 2025-12-31
 
 ### Added
@@ -11,10 +24,6 @@ All notable changes to this project will be documented in this file.
   - Automatic shutdown after 10 minutes of inactivity to preserve resources.
   - Markdown rendering with code highlighting support.
   - Full-text search and topic navigation directly in the browser.
-
-### Fixed
-- **Web UI API contract**: `/api/topics`, `/api/search`, and `/api/note` now return a consistent `{ ok: true|false, ... }` payload so the UI renders results instead of silently ignoring successful responses.
-- **Global search note navigation**: Clicking a search result from “Search all projects” now loads the correct note by passing `workspace/project` to `/api/note` (previously caused 404 due to context mismatch).
 
 ## [1.1.0] - 2025-11-30
 

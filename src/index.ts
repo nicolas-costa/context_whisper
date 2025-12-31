@@ -11,9 +11,8 @@ async function main() {
   program
     .name('context-whisper')
     .description('MCP Server for vectorized technical notes repository')
-    .version('1.2.0')
+    .version('1.3.0')
     .option('--db <path>', 'Path to SQLite database file')
-    .option('--workspace <name>', 'Workspace name')
     .option('--vec-lib <path>', 'Path to sqlite-vec extension library')
     .parse(process.argv);
 
@@ -22,14 +21,12 @@ async function main() {
   // Resolve configuration
   const config = resolveConfig(
     options.db,
-    options.workspace,
     options.vecLib
   );
 
   // Log configuration to stderr
-  console.error(`[context-whisper] Starting MCP server v1.2.0...`);
+  console.error(`[context-whisper] Starting MCP server v1.3.0...`);
   console.error(`[context-whisper] Database: ${config.dbPath}`);
-  console.error(`[context-whisper] Workspace: ${config.workspace}`);
   if (!config.vecLibPath) {
     console.error(`[context-whisper] ERROR: sqlite-vec extension not found.`);
     console.error(`[context-whisper] Vector search is REQUIRED for RAG functionality.`);
@@ -48,7 +45,7 @@ async function main() {
     const server = new Server(
       {
         name: 'context-whisper',
-        version: '1.2.0',
+        version: '1.3.0',
       },
       {
         capabilities: {

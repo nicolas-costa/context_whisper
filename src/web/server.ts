@@ -9,6 +9,9 @@ const __dirname = path.dirname(__filename);
 let child: ChildProcess | null = null;
 let currentUrl: string | null = null;
 
+// Keep a local version marker for the embedded web UI server
+export const WEB_UI_SERVER_VERSION = '1.3.0';
+
 export interface ServerOptions {
   database: Database.Database; // We actually just need the path for the child
   cwd: string;

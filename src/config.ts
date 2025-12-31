@@ -7,7 +7,6 @@ import { fileURLToPath } from 'url';
 
 export interface Config {
   dbPath: string;
-  workspace: string;
   vecLibPath: string | undefined;
 }
 
@@ -166,12 +165,10 @@ function findVecLib(): string | undefined {
  */
 export function resolveConfig(
   dbPath?: string,
-  workspace?: string,
   vecLibPath?: string
 ): Config {
   const config: Config = {
     dbPath: dbPath || env.CONTEXT_WHISPER_DB_PATH || getDefaultDbPath(),
-    workspace: workspace || env.CONTEXT_WHISPER_WORKSPACE || 'default',
     vecLibPath: vecLibPath || findVecLib(),
   };
 
