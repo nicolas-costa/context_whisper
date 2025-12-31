@@ -331,6 +331,58 @@ export function getNote(
 }
 
 /**
+ * Get a note by its numeric ID
+ */
+export function getNoteById(
+  db: Database.Database,
+  noteId: number
+): Note | null {
+  const stmt = db.prepare(`
+    SELECT *
+    FROM notes
+    WHERE note_id = ?
+    LIMIT 1
+  `);
+
+  const result = stmt.get(noteId) as Note | undefined;
+  return result || null;
+}
+
+/**
+ * Update note metadata (topic/subtopic/review_status) by note_id.
+ * IMPORTANT: subtopic is stored as '' (empty string) for UNIQUE constraint compatibility.
+ */
+export function updateNoteMeta(
+  db: Database.Database,
+  noteId: number,
+  topic: string,
+  subtopic: string | null,
+  reviewStatus: 'DRAFT' | 'APPROVED'
+): Note | null {
+  const normalizedSubtopic = subtopic || '';
+
+  const stmt = db.prepare(`
+    UPDATE notes
+    SET topic = :topic,
+        subtopic = :subtopic,
+        review_status = :review_status,
+        updated_at = datetime('now')
+    WHERE note_id = :note_id
+  `);
+
+  const result = stmt.run({
+    note_id: noteId,
+    topic,
+    subtopic: normalizedSubtopic,
+    review_status: reviewStatus,
+  }) as { changes: number };
+
+  if (!result.changes) return null;
+
+  return getNoteById(db, noteId);
+}
+
+/**
  * Search notes using vector similarity (KNN)
  */
 export function searchNotes(

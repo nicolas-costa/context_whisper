@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Context Whisper Notes</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <aside class="sidebar">
+            <div class="search-box">
+                <div class="search-input-wrapper">
+                    <input type="text" id="search-input" placeholder="Search notes...">
+                    <button id="search-button">Search</button>
+                </div>
+                <div class="search-options">
+                    <label>
+                        <input type="checkbox" id="global-search" checked> Search all projects
+                    </label>
+                </div>
+            </div>
+            <div id="topics-list" class="topics-list">
+                <!-- Topics will be loaded here -->
+            </div>
+        </aside>
+        <main class="content">
+            <div id="note-header" class="note-header" style="display: none;">
+                <div class="note-header-row">
+                    <input id="note-title-input" type="text" aria-label="Title" />
+                    <button id="note-save-button" type="button">Save</button>
+                </div>
+                <div class="note-header-row note-header-row-secondary">
+                    <input id="note-subtopic-input" type="text" aria-label="Subtopic" placeholder="Subtopic (optional)" />
+                    <select id="note-status-select" aria-label="Status">
+                        <option value="DRAFT">DRAFT</option>
+                        <option value="APPROVED">APPROVED</option>
+                    </select>
+                    <span id="note-save-status" class="note-save-status" aria-live="polite"></span>
+                </div>
+                <div id="note-meta"></div>
+            </div>
+            <div id="note-body" class="markdown-body">
+                <div class="empty-state">Select a note to view or search for topics.</div>
+            </div>
+        </main>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>
+

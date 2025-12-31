@@ -73,6 +73,21 @@ export interface DeleteNoteResult {
   context: DetectedContext;
 }
 
+export interface UpdateNoteMetaParams {
+  note_id: number;
+  topic: string;
+  subtopic?: string | null;
+  review_status: 'DRAFT' | 'APPROVED';
+  // Optional safety: if provided, we verify the note matches this scope
+  workspace?: string;
+  project?: string;
+}
+
+export interface UpdateNoteMetaResult {
+  note: Note | null;
+  context: DetectedContext;
+}
+
 /**
  * Parse markdown to extract code links
  * Format: [text](code:path/to/file.ext:start-end)
@@ -351,4 +366,55 @@ export function deleteNote(
     deleted,
     context,
   };
+}
+
+/**
+ * Update note metadata by note_id (topic/subtopic/review_status).
+ * This is intentionally scoped by note_id to avoid ambiguity and to support renames.
+ */
+export function updateNoteMeta(
+  database: Database.Database,
+  params: UpdateNoteMetaParams,
+  cwd?: string
+): UpdateNoteMetaResult {
+  const existing = db.getNoteById(database, params.note_id);
+  if (!existing) {
+    const context = detectContext(
+      {
+        workspace: params.workspace,
+        project: params.project,
+      },
+      cwd
+    );
+    return { note: null, context };
+  }
+
+  // Optional scope validation: prevents accidental cross-note edits when caller supplies ws/proj
+  if (params.workspace && existing.workspace !== params.workspace) {
+    const context = detectContext({ workspace: existing.workspace, project: existing.project, repo_url: existing.repo_url ?? undefined }, cwd);
+    return { note: null, context };
+  }
+  if (params.project && existing.project !== params.project) {
+    const context = detectContext({ workspace: existing.workspace, project: existing.project, repo_url: existing.repo_url ?? undefined }, cwd);
+    return { note: null, context };
+  }
+
+  const updated = db.updateNoteMeta(
+    database,
+    params.note_id,
+    params.topic,
+    params.subtopic ?? null,
+    params.review_status
+  );
+
+  const context = detectContext(
+    {
+      workspace: (updated?.workspace ?? existing.workspace),
+      project: (updated?.project ?? existing.project),
+      repo_url: (updated?.repo_url ?? existing.repo_url) ?? undefined,
+    },
+    cwd
+  );
+
+  return { note: updated, context };
 }
