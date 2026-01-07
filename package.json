@@ -1,7 +1,7 @@
 {
   "name": "context-whisper",
-  "version": "1.3.0",
-  "description": "MCP Server for vectorized technical notes repository using SQLite + sqlite-vec",
+  "version": "1.4.0",
+  "description": "MCP Server for vectorized technical notes repository with multi-database support (SQLite, PostgreSQL, MySQL + Qdrant)",
   "main": "dist/index.js",
   "repository": "https://github.com/nicolas-costa/context_whisper.git",
   "bin": {
@@ -16,9 +16,14 @@
   "keywords": [
     "mcp",
     "sqlite",
+    "postgresql",
+    "mysql",
+    "qdrant",
+    "pgvector",
     "vector",
     "embeddings",
-    "notes"
+    "notes",
+    "rag"
   ],
   "author": "",
   "license": "MIT",
@@ -30,12 +35,15 @@
     "commander": "^12.1.0",
     "fastify": "^5.6.2",
     "marked": "^17.0.1",
+    "mysql2": "^3.11.5",
+    "pg": "^8.13.1",
     "sqlite-vec": "^0.1.7-alpha.2",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.1",
+    "@types/pg": "^8.11.10",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   },

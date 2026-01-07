@@ -1,50 +1,29 @@
+/**
+ * Database Module - Backward Compatible API
+ * 
+ * This module provides backward compatibility with the original API
+ * while using the new adapter-based architecture internally.
+ * 
+ * For new code, prefer using the adapters directly from ./db/adapters/
+ */
+
 import Database from 'better-sqlite3';
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
+// Re-export types from adapters
+export type { Note, NoteLink, SearchResult } from './db/adapters/interface.js';
+import type { Note, NoteLink, SearchResult } from './db/adapters/interface.js';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-
-export interface Note {
-  note_id: number;
-  workspace: string;
-  project: string;
-  topic: string;
-  subtopic: string | null;
-  tags_json: string | null;
-  body_md: string;
-  created_by: string | null;
-  review_status: string;
-  repo_url: string | null;
-  repo_fingerprint: string | null;
-  repo_provider: string | null;
-  repo_owner: string | null;
-  repo_name: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface NoteLink {
-  note_id: number;
-  repo: string | null;
-  path: string | null;
-  symbol: string | null;
-  commit_sha: string | null;
-  line_start: number | null;
-  line_end: number | null;
-  markdown_context: string | null;
-  markdown_line: number | null;
-}
-
-export interface SearchResult extends Note {
-  distance: number;
-}
 
 let dbInstance: Database.Database | null = null;
 
 /**
  * Open SQLite database and load sqlite-vec extension
+ * @deprecated Use createDatabaseAdapter from db/factory.ts for multi-database support
  */
 export function openDB(dbPath: string, vecLibPath?: string): Database.Database {
   if (dbInstance) {
@@ -91,9 +70,10 @@ export function openDB(dbPath: string, vecLibPath?: string): Database.Database {
 /**
  * Initialize database schema
  * All statements in schema.sql are idempotent (IF NOT EXISTS, INSERT OR IGNORE)
+ * @deprecated Use adapter.initSchema() for multi-database support
  */
 export function initSchema(db: Database.Database): void {
-  const schemaPath = join(__dirname, '..', 'sql', 'schema.sql');
+  const schemaPath = join(__dirname, '..', 'sql', 'sqlite', 'schema.sql');
   const schema = readFileSync(schemaPath, 'utf-8');
   
   // Split schema into statements and execute individually to handle vec0 gracefully
@@ -147,6 +127,7 @@ export function initSchema(db: Database.Database): void {
 
 /**
  * Upsert a note into the database
+ * @deprecated Use adapter.relational.upsertNote() for multi-database support
  */
 export function upsertNote(
   db: Database.Database,
@@ -218,6 +199,7 @@ export function upsertNote(
 
 /**
  * Upsert repo path mapping (for resilience to moves/reclones)
+ * @deprecated Use adapter.relational.upsertRepoPath() for multi-database support
  */
 export function upsertRepoPath(
   db: Database.Database,
@@ -240,6 +222,7 @@ export function upsertRepoPath(
 /**
  * Upsert embedding vector for a note
  * Note: vec0 virtual tables don't support ON CONFLICT, so we DELETE then INSERT
+ * @deprecated Use adapter.vector.upsertVector() for multi-database support
  */
 export function upsertVector(
   db: Database.Database,
@@ -302,6 +285,7 @@ export function upsertVector(
 
 /**
  * Get a note by its unique key
+ * @deprecated Use adapter.relational.getNote() for multi-database support
  */
 export function getNote(
   db: Database.Database,
@@ -332,6 +316,7 @@ export function getNote(
 
 /**
  * Get a note by its numeric ID
+ * @deprecated Use adapter.relational.getNoteById() for multi-database support
  */
 export function getNoteById(
   db: Database.Database,
@@ -351,6 +336,7 @@ export function getNoteById(
 /**
  * Update note metadata (topic/subtopic/review_status) by note_id.
  * IMPORTANT: subtopic is stored as '' (empty string) for UNIQUE constraint compatibility.
+ * @deprecated Use adapter.relational.updateNoteMeta() for multi-database support
  */
 export function updateNoteMeta(
   db: Database.Database,
@@ -384,6 +370,7 @@ export function updateNoteMeta(
 
 /**
  * Search notes using vector similarity (KNN)
+ * @deprecated Use adapter.searchNotes() for multi-database support
  */
 export function searchNotes(
   db: Database.Database,
@@ -472,6 +459,7 @@ export function searchNotes(
 
 /**
  * List topics for a workspace/project
+ * @deprecated Use adapter.relational.listTopics() for multi-database support
  */
 export function listTopics(
   db: Database.Database,
@@ -496,6 +484,7 @@ export function listTopics(
 
 /**
  * Delete a note and its associated vector and links
+ * @deprecated Use adapter.relational.deleteNote() for multi-database support
  */
 export function deleteNote(
   db: Database.Database,
@@ -525,6 +514,7 @@ export function deleteNote(
 
 /**
  * Upsert note links
+ * @deprecated Use adapter.relational.upsertNoteLinks() for multi-database support
  */
 export function upsertNoteLinks(
   db: Database.Database,
@@ -563,6 +553,7 @@ export function upsertNoteLinks(
 
 /**
  * Get links for a note
+ * @deprecated Use adapter.relational.getNoteLinks() for multi-database support
  */
 export function getNoteLinks(db: Database.Database, noteId: number): NoteLink[] {
   const stmt = db.prepare(`
@@ -576,6 +567,7 @@ export function getNoteLinks(db: Database.Database, noteId: number): NoteLink[] 
 
 /**
  * Get schema version
+ * @deprecated Use adapter.relational.getSchemaVersion() for multi-database support
  */
 export function getSchemaVersion(db: Database.Database): number {
   try {
