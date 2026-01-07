@@ -6,10 +6,10 @@ MCP Server para repositório de notas técnicas vetorizadas com suporte a múlti
 
 O `context-whisper` é um servidor MCP (Model Context Protocol) que fornece um repositório de notas técnicas vetorizadas para projetos de software. Suporta múltiplos bancos de dados:
 
-- **SQLite + sqlite-vec** (default, zero-config)
-- **PostgreSQL + pgvector** (produção, escalável)
-- **MySQL + Qdrant** (MySQL para dados relacionais, Qdrant para vetores)
-- **SQLite/PostgreSQL + Qdrant** (separação de responsabilidades)
+- **SQLite + sqlite-vec** (default, zero-config, local)
+- **PostgreSQL + pgvector** (corporativo, escalável)
+- **MySQL + Qdrant** (corporativo sem suporte a vetores nativos)
+- **PostgreSQL + Qdrant** (corporativo que não permite instalar extensões)
 
 ## Características
 
