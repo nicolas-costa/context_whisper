@@ -8,8 +8,7 @@ O `context-whisper` é um servidor MCP (Model Context Protocol) que fornece um r
 
 - **SQLite + sqlite-vec** (default, zero-config, local)
 - **PostgreSQL + pgvector** (corporativo, escalável)
-- **MySQL + Qdrant** (corporativo sem suporte a vetores nativos)
-- **PostgreSQL + Qdrant** (corporativo que não permite instalar extensões)
+- **MySQL/PostgreSQL/SQLite + Qdrant** (quando preferir vector store externo ou não puder usar extensões nativas)
 
 ## Características
 
@@ -90,23 +89,39 @@ export ACME_CORP_PG_SSL=true  # opcional
 export CONTEXT_WHISPER_ENV=ACME_CORP
 ```
 
-#### MySQL + Qdrant (Empresa sem suporte a vetores nativos)
+#### Qualquer Banco + Qdrant (Vector Store Externo)
 
-MySQL não tem suporte nativo a vetores, então usa Qdrant como vector store:
+Você pode usar **qualquer banco relacional** (MySQL, PostgreSQL, SQLite) com **Qdrant** como vector store externo. Útil quando:
+- MySQL (não tem vetores nativos)
+- PostgreSQL sem permissão para instalar pgvector
+- Prefere Qdrant Cloud gerenciado
+- Quer escalar vector search independentemente
 
 ```bash
-# Banco MySQL corporativo
+# Exemplo: MySQL + Qdrant
 export BIGCLIENT_MYSQL_HOST=mysql.bigclient.com
 export BIGCLIENT_MYSQL_PORT=3306
 export BIGCLIENT_MYSQL_USER=app_user
 export BIGCLIENT_MYSQL_PASSWORD=secure_pass
 export BIGCLIENT_MYSQL_DATABASE=tech_docs
-
-# Qdrant para busca vetorial (pode ser cloud ou self-hosted)
 export BIGCLIENT_QDRANT_HOST=qdrant.bigclient.com
 export BIGCLIENT_QDRANT_PORT=6333
 export BIGCLIENT_QDRANT_API_KEY=optional_api_key
-export BIGCLIENT_QDRANT_COLLECTION=context_whisper_notes
+
+# Exemplo: PostgreSQL + Qdrant (forçando Qdrant ao invés de pgvector)
+export CORP_PG_HOST=db.corp.com
+export CORP_PG_USER=user
+export CORP_PG_PASSWORD=pass
+export CORP_PG_DATABASE=whisper
+export CORP_QDRANT_HOST=qdrant.corp.com
+export CORP_VECTOR_STORE=qdrant  # força Qdrant ao invés de pgvector
+
+# Exemplo: SQLite local + Qdrant Cloud
+export LOCAL_SQLITE_PATH=~/.local/share/context-whisper/notes.sqlite
+export LOCAL_QDRANT_HOST=abc123.qdrant.cloud
+export LOCAL_QDRANT_API_KEY=your_cloud_api_key
+export LOCAL_QDRANT_HTTPS=true
+export LOCAL_VECTOR_STORE=qdrant  # força Qdrant ao invés de sqlite-vec
 ```
 
 #### Múltiplos Ambientes Simultâneos

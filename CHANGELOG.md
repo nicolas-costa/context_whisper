@@ -5,12 +5,13 @@ All notable changes to this project will be documented in this file.
 ## [1.4.0] - 2026-01-07
 
 ### Added
-- **Multi-database support**: Now supports PostgreSQL + pgvector, MySQL + Qdrant, and SQLite + sqlite-vec combinations.
-- **Environment-based configuration**: Configure multiple database environments via environment variables (e.g., `PROD_PG_HOST`, `DEV_MYSQL_HOST`).
+- **Multi-database support**: SQLite, PostgreSQL, MySQL for relational data; sqlite-vec, pgvector, Qdrant for vectors.
+- **Flexible combinations**: Any relational DB can use Qdrant as vector store (MySQL/PostgreSQL/SQLite + Qdrant).
+- **Environment-based configuration**: Configure multiple database environments via environment variables (e.g., `ACME_CORP_PG_HOST`, `STARTUP_XYZ_MYSQL_HOST`, `LOCAL_SQLITE_PATH`).
 - **Database adapters architecture**: New modular adapter system for relational and vector databases.
-- **Qdrant integration**: Support for Qdrant as external vector store (useful with MySQL which lacks native vector support).
+- **Qdrant integration**: Support for Qdrant as external vector store (useful when native extensions aren't available or you prefer managed vector search).
 - **PostgreSQL adapter**: Full support for PostgreSQL with pgvector extension for vector operations.
-- **MySQL adapter**: Support for MySQL as relational store (requires Qdrant for vector operations).
+- **MySQL adapter**: Support for MySQL as relational store (use with Qdrant for vector operations).
 
 ### Changed
 - **Configuration system**: Enhanced `config.ts` to support multi-environment database configurations.
@@ -24,28 +25,39 @@ All notable changes to this project will be documented in this file.
 
 ### Configuration Examples
 
+Ambientes representam bancos locais ou corporativos (ex: `LOCAL_`, `ACME_CORP_`, `STARTUP_XYZ_`).
+
 #### Single SQLite (default, backward compatible)
 ```bash
 # No configuration needed - uses ~/.local/share/context-whisper/meta.sqlite
 ```
 
-#### PostgreSQL + pgvector
+#### PostgreSQL + pgvector (empresa com infra própria)
 ```bash
-export PROD_PG_HOST=db.example.com
-export PROD_PG_PORT=5432
-export PROD_PG_USER=myuser
-export PROD_PG_PASSWORD=mypass
-export PROD_PG_DATABASE=context_whisper
+export ACME_CORP_PG_HOST=db.acme-corp.internal
+export ACME_CORP_PG_PORT=5432
+export ACME_CORP_PG_USER=whisper_user
+export ACME_CORP_PG_PASSWORD=secret123
+export ACME_CORP_PG_DATABASE=context_whisper
 ```
 
-#### MySQL + Qdrant
+#### MySQL + Qdrant (empresa sem vetores nativos)
 ```bash
-export DEV_MYSQL_HOST=mysql.example.com
-export DEV_MYSQL_USER=dev_user
-export DEV_MYSQL_PASSWORD=dev_pass
-export DEV_MYSQL_DATABASE=context_whisper
-export DEV_QDRANT_HOST=qdrant.example.com
-export DEV_QDRANT_PORT=6333
+export STARTUP_XYZ_MYSQL_HOST=mysql.startup-xyz.com
+export STARTUP_XYZ_MYSQL_USER=app_user
+export STARTUP_XYZ_MYSQL_PASSWORD=secure_pass
+export STARTUP_XYZ_MYSQL_DATABASE=tech_docs
+export STARTUP_XYZ_QDRANT_HOST=qdrant.startup-xyz.com
+export STARTUP_XYZ_QDRANT_PORT=6333
+```
+
+#### SQLite local + Qdrant Cloud
+```bash
+export LOCAL_SQLITE_PATH=~/.local/share/context-whisper/notes.sqlite
+export LOCAL_QDRANT_HOST=abc123.qdrant.cloud
+export LOCAL_QDRANT_API_KEY=your_api_key
+export LOCAL_QDRANT_HTTPS=true
+export LOCAL_VECTOR_STORE=qdrant
 ```
 
 ## [1.3.0] - 2025-12-31

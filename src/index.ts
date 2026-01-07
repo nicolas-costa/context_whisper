@@ -16,7 +16,7 @@ async function main() {
     .version(VERSION)
     .option('--db <path>', 'Path to SQLite database file')
     .option('--vec-lib <path>', 'Path to sqlite-vec extension library')
-    .option('--env <name>', 'Environment name to use (e.g., PROD, DEV)')
+    .option('--env <name>', 'Environment name to use (e.g., LOCAL, ACME_CORP, STARTUP_XYZ)')
     .parse(process.argv);
 
   const options = program.opts();
