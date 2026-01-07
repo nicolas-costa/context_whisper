@@ -60,69 +60,81 @@ Sem configuração necessária. O banco é criado automaticamente em:
 
 ### Variáveis de Ambiente
 
-#### Estrutura: `{ENV}_{DB}_{PARAM}`
+#### Estrutura: `{AMBIENTE}_{DB}_{PARAM}`
 
-Use prefixos de ambiente (PROD, DEV, STG, etc.) para configurar múltiplos bancos:
+Use prefixos de ambiente para configurar múltiplos bancos. Ambientes representam **bancos locais ou corporativos**:
 
-#### PostgreSQL + pgvector
+- `LOCAL_*` - Desenvolvimento local
+- `ACME_CORP_*` - Cliente/empresa específica
+- `STARTUP_XYZ_*` - Outro cliente
+
+#### SQLite Local (Desenvolvimento)
 
 ```bash
-# PostgreSQL como banco relacional + pgvector para vetores
-export PROD_PG_HOST=db.example.com
-export PROD_PG_PORT=5432
-export PROD_PG_USER=myuser
-export PROD_PG_PASSWORD=mypassword
-export PROD_PG_DATABASE=context_whisper
-export PROD_PG_SSL=true  # opcional
-
-# Ativar ambiente PROD por padrão
-export CONTEXT_WHISPER_ENV=PROD
+# SQLite em path customizado
+export LOCAL_SQLITE_PATH=/home/dev/notes.sqlite
 ```
 
-#### MySQL + Qdrant
-
-MySQL não tem suporte nativo a vetores, então usa Qdrant:
+#### PostgreSQL + pgvector (Empresa com infra própria)
 
 ```bash
-# MySQL como banco relacional
-export DEV_MYSQL_HOST=mysql.example.com
-export DEV_MYSQL_PORT=3306
-export DEV_MYSQL_USER=dev_user
-export DEV_MYSQL_PASSWORD=dev_password
-export DEV_MYSQL_DATABASE=context_whisper
+# Cliente que usa PostgreSQL com pgvector
+export ACME_CORP_PG_HOST=db.acme-corp.internal
+export ACME_CORP_PG_PORT=5432
+export ACME_CORP_PG_USER=whisper_user
+export ACME_CORP_PG_PASSWORD=secret123
+export ACME_CORP_PG_DATABASE=context_whisper
+export ACME_CORP_PG_SSL=true  # opcional
 
-# Qdrant para busca vetorial
-export DEV_QDRANT_HOST=qdrant.example.com
-export DEV_QDRANT_PORT=6333
-export DEV_QDRANT_API_KEY=optional_api_key
-export DEV_QDRANT_COLLECTION=context_whisper_notes
-export DEV_QDRANT_HTTPS=false
+# Ativar esse ambiente por padrão
+export CONTEXT_WHISPER_ENV=ACME_CORP
 ```
 
-#### SQLite + Qdrant
+#### MySQL + Qdrant (Empresa sem suporte a vetores nativos)
 
-SQLite local com Qdrant remoto para vetores:
+MySQL não tem suporte nativo a vetores, então usa Qdrant como vector store:
 
 ```bash
-export TEST_SQLITE_PATH=/path/to/test.db
-export TEST_QDRANT_HOST=localhost
-export TEST_QDRANT_PORT=6333
-export TEST_VECTOR_STORE=qdrant  # força uso do Qdrant
+# Banco MySQL corporativo
+export BIGCLIENT_MYSQL_HOST=mysql.bigclient.com
+export BIGCLIENT_MYSQL_PORT=3306
+export BIGCLIENT_MYSQL_USER=app_user
+export BIGCLIENT_MYSQL_PASSWORD=secure_pass
+export BIGCLIENT_MYSQL_DATABASE=tech_docs
+
+# Qdrant para busca vetorial (pode ser cloud ou self-hosted)
+export BIGCLIENT_QDRANT_HOST=qdrant.bigclient.com
+export BIGCLIENT_QDRANT_PORT=6333
+export BIGCLIENT_QDRANT_API_KEY=optional_api_key
+export BIGCLIENT_QDRANT_COLLECTION=context_whisper_notes
 ```
 
-#### Seleção Explícita do Vector Store
+#### Múltiplos Ambientes Simultâneos
 
 ```bash
-# Força pgvector mesmo quando há Qdrant configurado
-export PROD_VECTOR_STORE=pgvector
+# Ambiente local (SQLite)
+export LOCAL_SQLITE_PATH=~/.local/share/context-whisper/local.sqlite
 
-# Força Qdrant mesmo com PostgreSQL
-export PROD_VECTOR_STORE=qdrant
+# Cliente 1 - PostgreSQL + pgvector
+export ACME_PG_HOST=db.acme.com
+export ACME_PG_USER=user
+export ACME_PG_PASSWORD=pass
+export ACME_PG_DATABASE=whisper
+
+# Cliente 2 - MySQL + Qdrant
+export STARTUP_MYSQL_HOST=mysql.startup.io
+export STARTUP_MYSQL_USER=admin
+export STARTUP_MYSQL_PASSWORD=pwd
+export STARTUP_MYSQL_DATABASE=docs
+export STARTUP_QDRANT_HOST=vector.startup.io
+
+# Selecionar ambiente ativo
+export CONTEXT_WHISPER_ENV=LOCAL  # ou ACME, STARTUP
 ```
 
 ### Variáveis Legadas (Compatibilidade)
 
-As variáveis antigas continuam funcionando:
+As variáveis antigas continuam funcionando para backward compatibility:
 
 ```bash
 export CONTEXT_WHISPER_DB_PATH=/custom/path/meta.sqlite
@@ -133,13 +145,13 @@ export CONTEXT_WHISPER_VEC_LIB=/path/to/vec0.so
 
 ```bash
 # Via CLI
-context-whisper --env PROD
+context-whisper --env ACME_CORP
 
 # Via variável de ambiente
-CONTEXT_WHISPER_ENV=DEV context-whisper
+CONTEXT_WHISPER_ENV=BIGCLIENT context-whisper
 ```
 
-### Exemplo: MCP Client Config
+### Exemplo: MCP Client Config (Cursor/Claude Desktop)
 
 ```json
 {
@@ -148,16 +160,20 @@ CONTEXT_WHISPER_ENV=DEV context-whisper
       "command": "npx",
       "args": ["context-whisper"],
       "env": {
-        "PROD_PG_HOST": "prod.db.example.com",
-        "PROD_PG_USER": "app_user",
-        "PROD_PG_PASSWORD": "secret",
-        "PROD_PG_DATABASE": "context_whisper",
-        "DEV_MYSQL_HOST": "dev.db.example.com",
-        "DEV_MYSQL_USER": "dev_user",
-        "DEV_MYSQL_PASSWORD": "dev_secret",
-        "DEV_MYSQL_DATABASE": "context_whisper_dev",
-        "DEV_QDRANT_HOST": "qdrant.dev.example.com",
-        "CONTEXT_WHISPER_ENV": "PROD"
+        "LOCAL_SQLITE_PATH": "/home/user/.local/share/context-whisper/local.sqlite",
+        
+        "ACME_CORP_PG_HOST": "db.acme-corp.internal",
+        "ACME_CORP_PG_USER": "whisper",
+        "ACME_CORP_PG_PASSWORD": "secret",
+        "ACME_CORP_PG_DATABASE": "context_whisper",
+        
+        "STARTUP_XYZ_MYSQL_HOST": "mysql.startup-xyz.com",
+        "STARTUP_XYZ_MYSQL_USER": "app",
+        "STARTUP_XYZ_MYSQL_PASSWORD": "pass",
+        "STARTUP_XYZ_MYSQL_DATABASE": "tech_notes",
+        "STARTUP_XYZ_QDRANT_HOST": "qdrant.startup-xyz.com",
+        
+        "CONTEXT_WHISPER_ENV": "LOCAL"
       }
     }
   }
