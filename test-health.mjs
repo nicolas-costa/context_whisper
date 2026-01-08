@@ -1,11 +1,21 @@
 import { spawn } from 'child_process';
-import { readFileSync } from 'fs';
+import { existsSync } from 'fs';
+import path from 'path';
 
 // Test the health tool via MCP protocol
-const server = spawn('npx', ['-y', 'tsx', 'src/index.ts'], {
+// Prefer running the built CLI (dist/) to match real npx usage; fall back to tsx for dev.
+const distEntry = path.join(process.cwd(), 'dist', 'index.js');
+const useDist = existsSync(distEntry);
+
+const server = useDist
+  ? spawn('node', [distEntry], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      cwd: process.cwd(),
+    })
+  : spawn('npx', ['-y', 'tsx', 'src/index.ts'], {
   stdio: ['pipe', 'pipe', 'pipe'],
   cwd: process.cwd()
-});
+    });
 
 let output = '';
 let errorOutput = '';
@@ -62,12 +72,28 @@ setTimeout(() => {
     server.stdin.write(JSON.stringify(healthRequest) + '\n');
     
     setTimeout(() => {
+      // Also sanity-check search_notes contract: allow global search without repo_url
+      const globalSearchRequest = {
+        jsonrpc: '2.0',
+        id: 4,
+        method: 'tools/call',
+        params: {
+          name: 'search_notes',
+          arguments: {
+            query: 'health check global search',
+          }
+        }
+      };
+      server.stdin.write(JSON.stringify(globalSearchRequest) + '\n');
+
+      setTimeout(() => {
       console.log('=== STDOUT ===');
       console.log(output);
       console.log('\n=== STDERR ===');
       console.log(errorOutput);
       server.kill();
       process.exit(0);
+      }, 1500);
     }, 2000);
   }, 1000);
 }, 1000);

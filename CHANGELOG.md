@@ -2,6 +2,64 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.0] - 2026-01-07
+
+### Added
+- **Multi-database support**: SQLite, PostgreSQL, MySQL for relational data; sqlite-vec, pgvector, Qdrant for vectors.
+- **Flexible combinations**: Any relational DB can use Qdrant as vector store (MySQL/PostgreSQL/SQLite + Qdrant).
+- **Environment-based configuration**: Configure multiple database environments via environment variables (e.g., `ACME_CORP_PG_HOST`, `STARTUP_XYZ_MYSQL_HOST`, `LOCAL_SQLITE_PATH`).
+- **Database adapters architecture**: New modular adapter system for relational and vector databases.
+- **Qdrant integration**: Support for Qdrant as external vector store (useful when native extensions aren't available or you prefer managed vector search).
+- **PostgreSQL adapter**: Full support for PostgreSQL with pgvector extension for vector operations.
+- **MySQL adapter**: Support for MySQL as relational store (use with Qdrant for vector operations).
+
+### Changed
+- **Configuration system**: Enhanced `config.ts` to support multi-environment database configurations.
+- **Schema migrations**: Separate migration files for each database type (`sql/sqlite/`, `sql/postgres/`, `sql/mysql/`).
+- **Package description**: Updated to reflect multi-database capabilities.
+
+### Backward Compatibility
+- **Default behavior**: Without any environment configuration, the server uses SQLite + sqlite-vec (same as v1.3.0).
+- **Legacy API**: The `db.ts` module maintains backward-compatible functions (marked as deprecated).
+- **Environment variables**: Existing `CONTEXT_WHISPER_DB_PATH` and `CONTEXT_WHISPER_VEC_LIB` continue to work.
+
+### Configuration Examples
+
+Ambientes representam bancos locais ou corporativos (ex: `LOCAL_`, `ACME_CORP_`, `STARTUP_XYZ_`).
+
+#### Single SQLite (default, backward compatible)
+```bash
+# No configuration needed - uses ~/.local/share/context-whisper/meta.sqlite
+```
+
+#### PostgreSQL + pgvector (empresa com infra própria)
+```bash
+export ACME_CORP_PG_HOST=db.acme-corp.internal
+export ACME_CORP_PG_PORT=5432
+export ACME_CORP_PG_USER=whisper_user
+export ACME_CORP_PG_PASSWORD=secret123
+export ACME_CORP_PG_DATABASE=context_whisper
+```
+
+#### MySQL + Qdrant (empresa sem vetores nativos)
+```bash
+export STARTUP_XYZ_MYSQL_HOST=mysql.startup-xyz.com
+export STARTUP_XYZ_MYSQL_USER=app_user
+export STARTUP_XYZ_MYSQL_PASSWORD=secure_pass
+export STARTUP_XYZ_MYSQL_DATABASE=tech_docs
+export STARTUP_XYZ_QDRANT_HOST=qdrant.startup-xyz.com
+export STARTUP_XYZ_QDRANT_PORT=6333
+```
+
+#### SQLite local + Qdrant Cloud
+```bash
+export LOCAL_SQLITE_PATH=~/.local/share/context-whisper/notes.sqlite
+export LOCAL_QDRANT_HOST=abc123.qdrant.cloud
+export LOCAL_QDRANT_API_KEY=your_api_key
+export LOCAL_QDRANT_HTTPS=true
+export LOCAL_VECTOR_STORE=qdrant
+```
+
 ## [1.3.0] - 2025-12-31
 
 ### Added
@@ -12,7 +70,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - **Web UI API contract**: `/api/topics`, `/api/search`, and `/api/note` return a consistent `{ ok: true|false, ... }` payload (UI no longer ignores successful responses).
-- **Global search note navigation**: Clicking results from “Search all projects” loads the correct note by passing `workspace/project` to `/api/note`.
+- **Global search note navigation**: Clicking results from "Search all projects" loads the correct note by passing `workspace/project` to `/api/note`.
 - **Web UI readability**: Note content uses an explicit light background (no dark-theme bleed-through).
 
 ## [1.2.0] - 2025-12-31

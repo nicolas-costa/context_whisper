@@ -1,20 +1,25 @@
 # context-whisper
 
-MCP Server para repositório de notas técnicas vetorizadas usando SQLite + sqlite-vec.
+MCP Server para repositório de notas técnicas vetorizadas com suporte a múltiplos bancos de dados.
 
 ## Descrição
 
-O `context-whisper` é um servidor MCP (Model Context Protocol) que fornece um repositório de notas técnicas vetorizadas para projetos de software. Ele utiliza SQLite com a extensão `sqlite-vec` para realizar buscas por similaridade semântica (KNN) diretamente em SQL, e embeddings locais com `@xenova/transformers` para gerar vetores de documentos.
+O `context-whisper` é um servidor MCP (Model Context Protocol) que fornece um repositório de notas técnicas vetorizadas para projetos de software. Suporta múltiplos bancos de dados:
+
+- **SQLite + sqlite-vec** (default, zero-config, local)
+- **PostgreSQL + pgvector** (corporativo, escalável)
+- **MySQL/PostgreSQL/SQLite + Qdrant** (quando preferir vector store externo ou não puder usar extensões nativas)
 
 ## Características
 
 - **Busca Vetorial Semântica**: Busque notas técnicas usando similaridade semântica, não apenas palavras-chave
 - **Embeddings Locais**: Gera embeddings usando modelos locais (MiniLM-L6-v2), sem necessidade de APIs externas
+- **Multi-Database**: Suporte a SQLite, PostgreSQL, MySQL + Qdrant
+- **Multi-Environment**: Configure PROD, DEV, STG via variáveis de ambiente
 - **Rastreabilidade**: Links notas técnicas com código-fonte específico (repo, path, símbolos, linhas)
 - **Workspace/Project Organization**: Organize notas por workspace e projeto
 - **Tags e Status**: Categorize notas com tags e controle de revisão (DRAFT/APPROVED)
-- **Auto-detecção de Contexto**: Detecta automaticamente workspace/project do Git, configuração ou estrutura de pastas
-- **Rastreabilidade de Repositório**: Armazena informações do repositório (URL, fingerprint, provider, owner) para melhor organização
+- **Auto-detecção de Contexto**: Detecta automaticamente workspace/project do Git
 
 ## Instalação
 
@@ -41,37 +46,164 @@ npm run dev
 
 - `--db <path>`: Caminho para o arquivo SQLite (padrão: ~/.local/share/context-whisper/meta.sqlite no Linux)
 - `--vec-lib <path>`: Caminho para a extensão sqlite-vec
+- `--env <name>`: Nome do ambiente a usar (e.g., PROD, DEV)
+
+## Configuração de Banco de Dados
+
+### SQLite + sqlite-vec (Default)
+
+Sem configuração necessária. O banco é criado automaticamente em:
+- **Linux**: `~/.local/share/context-whisper/meta.sqlite`
+- **macOS**: `~/Library/Application Support/context-whisper/meta.sqlite`
+- **Windows**: `%AppData%/context-whisper/meta.sqlite`
 
 ### Variáveis de Ambiente
 
-- `CONTEXT_WHISPER_DB_PATH`: Caminho do banco de dados
-- `CONTEXT_WHISPER_VEC_LIB`: Caminho da extensão sqlite-vec
+#### Estrutura: `{AMBIENTE}_{DB}_{PARAM}`
 
+Use prefixos de ambiente para configurar múltiplos bancos. Ambientes representam **bancos locais ou corporativos**:
 
-## Instalação do sqlite-vec (Automático)
+- `LOCAL_*` - Desenvolvimento local
+- `ACME_CORP_*` - Cliente/empresa específica
+- `STARTUP_XYZ_*` - Outro cliente
 
-O `sqlite-vec` é **essencial** para a funcionalidade RAG (Retrieval-Augmented Generation) e está incluído como dependência. O binário correto para sua plataforma será instalado automaticamente via npm:
+#### SQLite Local (Desenvolvimento)
+
+```bash
+# SQLite em path customizado
+export LOCAL_SQLITE_PATH=/home/dev/notes.sqlite
+```
+
+#### PostgreSQL + pgvector (Empresa com infra própria)
+
+```bash
+# Cliente que usa PostgreSQL com pgvector
+export ACME_CORP_PG_HOST=db.acme-corp.internal
+export ACME_CORP_PG_PORT=5432
+export ACME_CORP_PG_USER=whisper_user
+export ACME_CORP_PG_PASSWORD=secret123
+export ACME_CORP_PG_DATABASE=context_whisper
+export ACME_CORP_PG_SSL=true  # opcional
+
+# Ativar esse ambiente por padrão
+export CONTEXT_WHISPER_ENV=ACME_CORP
+```
+
+#### Qualquer Banco + Qdrant (Vector Store Externo)
+
+Você pode usar **qualquer banco relacional** (MySQL, PostgreSQL, SQLite) com **Qdrant** como vector store externo. Útil quando:
+- MySQL (não tem vetores nativos)
+- PostgreSQL sem permissão para instalar pgvector
+- Prefere Qdrant Cloud gerenciado
+- Quer escalar vector search independentemente
+
+```bash
+# Exemplo: MySQL + Qdrant
+export BIGCLIENT_MYSQL_HOST=mysql.bigclient.com
+export BIGCLIENT_MYSQL_PORT=3306
+export BIGCLIENT_MYSQL_USER=app_user
+export BIGCLIENT_MYSQL_PASSWORD=secure_pass
+export BIGCLIENT_MYSQL_DATABASE=tech_docs
+export BIGCLIENT_QDRANT_HOST=qdrant.bigclient.com
+export BIGCLIENT_QDRANT_PORT=6333
+export BIGCLIENT_QDRANT_API_KEY=optional_api_key
+
+# Exemplo: PostgreSQL + Qdrant (forçando Qdrant ao invés de pgvector)
+export CORP_PG_HOST=db.corp.com
+export CORP_PG_USER=user
+export CORP_PG_PASSWORD=pass
+export CORP_PG_DATABASE=whisper
+export CORP_QDRANT_HOST=qdrant.corp.com
+export CORP_VECTOR_STORE=qdrant  # força Qdrant ao invés de pgvector
+
+# Exemplo: SQLite local + Qdrant Cloud
+export LOCAL_SQLITE_PATH=~/.local/share/context-whisper/notes.sqlite
+export LOCAL_QDRANT_HOST=abc123.qdrant.cloud
+export LOCAL_QDRANT_API_KEY=your_cloud_api_key
+export LOCAL_QDRANT_HTTPS=true
+export LOCAL_VECTOR_STORE=qdrant  # força Qdrant ao invés de sqlite-vec
+```
+
+#### Múltiplos Ambientes Simultâneos
+
+```bash
+# Ambiente local (SQLite)
+export LOCAL_SQLITE_PATH=~/.local/share/context-whisper/local.sqlite
+
+# Cliente 1 - PostgreSQL + pgvector
+export ACME_PG_HOST=db.acme.com
+export ACME_PG_USER=user
+export ACME_PG_PASSWORD=pass
+export ACME_PG_DATABASE=whisper
+
+# Cliente 2 - MySQL + Qdrant
+export STARTUP_MYSQL_HOST=mysql.startup.io
+export STARTUP_MYSQL_USER=admin
+export STARTUP_MYSQL_PASSWORD=pwd
+export STARTUP_MYSQL_DATABASE=docs
+export STARTUP_QDRANT_HOST=vector.startup.io
+
+# Selecionar ambiente ativo
+export CONTEXT_WHISPER_ENV=LOCAL  # ou ACME, STARTUP
+```
+
+### Variáveis Legadas (Compatibilidade)
+
+As variáveis antigas continuam funcionando para backward compatibility:
+
+```bash
+export CONTEXT_WHISPER_DB_PATH=/custom/path/meta.sqlite
+export CONTEXT_WHISPER_VEC_LIB=/path/to/vec0.so
+```
+
+### Seleção de Ambiente em Runtime
+
+```bash
+# Via CLI
+context-whisper --env ACME_CORP
+
+# Via variável de ambiente
+CONTEXT_WHISPER_ENV=BIGCLIENT context-whisper
+```
+
+### Exemplo: MCP Client Config (Cursor/Claude Desktop)
+
+```json
+{
+  "mcpServers": {
+    "context-whisper": {
+      "command": "npx",
+      "args": ["context-whisper"],
+      "env": {
+        "LOCAL_SQLITE_PATH": "/home/user/.local/share/context-whisper/local.sqlite",
+        
+        "ACME_CORP_PG_HOST": "db.acme-corp.internal",
+        "ACME_CORP_PG_USER": "whisper",
+        "ACME_CORP_PG_PASSWORD": "secret",
+        "ACME_CORP_PG_DATABASE": "context_whisper",
+        
+        "STARTUP_XYZ_MYSQL_HOST": "mysql.startup-xyz.com",
+        "STARTUP_XYZ_MYSQL_USER": "app",
+        "STARTUP_XYZ_MYSQL_PASSWORD": "pass",
+        "STARTUP_XYZ_MYSQL_DATABASE": "tech_notes",
+        "STARTUP_XYZ_QDRANT_HOST": "qdrant.startup-xyz.com",
+        
+        "CONTEXT_WHISPER_ENV": "LOCAL"
+      }
+    }
+  }
+}
+```
+
+## Instalação do sqlite-vec (Para SQLite)
+
+O `sqlite-vec` é **essencial** quando usando SQLite e está incluído como dependência:
 
 ```bash
 npm install
 ```
 
-O servidor detectará automaticamente o binário (`vec0.so` no Linux, `vec0.dylib` no macOS, `vec0.dll` no Windows) em `node_modules/sqlite-vec-<platform>-<arch>/`.
-
-**Detecção automática:**
-
-O servidor procura a extensão automaticamente em:
-1. `node_modules/sqlite-vec-<platform>-<arch>/vector0` (se instalado via npm)
-2. Paths comuns do sistema:
-   - `/usr/local/lib/sqlite3/vector0`
-   - `/usr/lib/x86_64-linux-gnu/sqlite3/vector0`
-   - `/usr/lib/sqlite3/vector0`
-   - `/opt/homebrew/lib/sqlite3/vector0`
-   - `/usr/local/lib/vector0`
-
-**Especificar caminho manualmente (se necessário):**
-
-Use `--vec-lib <path>` ou `CONTEXT_WHISPER_VEC_LIB` se a detecção automática falhar.
+O binário correto para sua plataforma será instalado automaticamente.
 
 ## Tools MCP
 
@@ -101,11 +233,6 @@ Cria ou atualiza uma nota técnica vetorizada.
 }
 ```
 
-**Nota:**
-- `repo_url` é obrigatório e deve ser obtido via `git config --get remote.origin.url` no diretório do projeto
-- `workspace` e `project` são derivados automaticamente da URL
-- `created_by` deve ser preenchido no formato: "git_user_name (agent_name)" - ex: "John Doe (claude-sonnet)"
-
 ### get_note
 
 Recupera uma nota específica do repositório.
@@ -119,15 +246,14 @@ Recupera uma nota específica do repositório.
 }
 ```
 
-**Nota:** `repo_url` é obrigatório.
-
 ### search_notes
 
-Busca notas usando similaridade semântica vetorial. Busca global se repo_url não for especificado.
+Busca notas usando similaridade semântica vetorial.
 
 **Payload:**
 ```json
 {
+  "environment": "LOCAL",
   "query": "refresh token expiração",
   "top_k": 5,
   "tags": ["backend"],
@@ -136,69 +262,38 @@ Busca notas usando similaridade semântica vetorial. Busca global se repo_url n�
 }
 ```
 
-**Nota:** `repo_url` é opcional - se não fornecido, busca em todos os repositórios.
+**Nota:** `repo_url` é opcional. Se `repo_url` não for fornecido, a busca é **global** (todos os repositórios).
 
 ### list_topics
 
 Lista todos os tópicos disponíveis para um repositório.
 
-**Payload:**
-```json
-{
-  "repo_url": "https://github.com/workspace/project"
-}
-```
-
-**Nota:** `repo_url` é obrigatório.
-
 ### delete_note
 
 Remove uma nota e todos os dados associados.
 
-**Payload:**
-```json
-{
-  "repo_url": "https://github.com/workspace/project",
-  "topic": "autenticacao",
-  "subtopic": "jwt"
-}
-```
-
-**Nota:** `repo_url` é obrigatório.
-
-
-
 ### health
 
-Verifica o status do banco de dados e extensão sqlite-vec.
+Verifica o status do banco de dados e extensões.
 
-**Payload:** `{}`
+### serve_notes_ui
 
-## Estrutura do Banco de Dados
+Inicia servidor web local para visualização das notas.
 
-O banco de dados SQLite contém:
+### stop_notes_server
 
-- **notes**: Tabela principal com notas técnicas
-- **note_links**: Links para código-fonte relacionado
-- **note_vectors**: Tabela virtual com embeddings (384 dimensões)
-
-## Regras de Comportamento
-
-O sistema inclui uma mensagem de sistema que orienta agentes a:
-
-1. **Usar `upsert_note`** para documentação técnica em vez de criar arquivos `.md`
-2. **Consultar `search_notes`** antes de analisar código para entender decisões técnicas
-3. **Fornecer `repo_url`** em todas as operações (obter via `git config --get remote.origin.url`)
-4. **Workspace/project são derivados automaticamente** da repo_url fornecida
+Encerra o servidor web de visualização.
 
 ## Dependências
 
 - `better-sqlite3`: Cliente SQLite para Node.js
+- `pg`: Cliente PostgreSQL para Node.js
+- `mysql2`: Cliente MySQL para Node.js
 - `@xenova/transformers`: Embeddings locais
-- `sqlite-vec`: Extensão SQLite para busca vetorial (deve ser instalada separadamente)
+- `sqlite-vec`: Extensão SQLite para busca vetorial
 - `@modelcontextprotocol/sdk`: SDK do MCP
 - `zod`: Validação de schemas
-- `commander`: CLI parsing
+- `fastify`: Servidor web para UI
 
 ## Desenvolvimento
 
@@ -219,4 +314,3 @@ npm start
 ## Licença
 
 MIT
-

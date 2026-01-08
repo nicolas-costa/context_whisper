@@ -4,10 +4,20 @@ import { env, cwd as processCwd } from 'process';
 import { platform } from 'os';
 import { existsSync, mkdirSync } from 'fs';
 import { fileURLToPath } from 'url';
+import type { EnvironmentConfig } from './db/factory.js';
+import {
+  parseAllEnvironmentConfigs,
+  parseEnvironmentConfig,
+  createDefaultSQLiteConfig,
+} from './db/factory.js';
 
 export interface Config {
   dbPath: string;
   vecLibPath: string | undefined;
+  /** All configured environments */
+  environments: Map<string, EnvironmentConfig>;
+  /** Default environment name */
+  defaultEnvironment: string;
 }
 
 /**
@@ -162,22 +172,95 @@ function findVecLib(): string | undefined {
 /**
  * Resolve configuration from CLI args, ENV vars, and defaults
  * Precedence: CLI > ENV > default
+ * 
+ * Environment variables for multi-database support:
+ * - {ENV}_SQLITE_PATH - SQLite database path
+ * - {ENV}_PG_HOST, {ENV}_PG_PORT, {ENV}_PG_USER, {ENV}_PG_PASSWORD, {ENV}_PG_DATABASE, {ENV}_PG_SSL
+ * - {ENV}_MYSQL_HOST, {ENV}_MYSQL_PORT, {ENV}_MYSQL_USER, {ENV}_MYSQL_PASSWORD, {ENV}_MYSQL_DATABASE, {ENV}_MYSQL_SSL
+ * - {ENV}_QDRANT_HOST, {ENV}_QDRANT_PORT, {ENV}_QDRANT_API_KEY, {ENV}_QDRANT_COLLECTION, {ENV}_QDRANT_HTTPS
+ * - {ENV}_VECTOR_STORE - "sqlite-vec" | "pgvector" | "qdrant"
+ * 
+ * Examples:
+ * - PROD_PG_HOST=prod.db.com + PROD_PG_USER=... -> PostgreSQL + pgvector for PROD
+ * - DEV_MYSQL_HOST=dev.db.com + DEV_QDRANT_HOST=qdrant.dev.com -> MySQL + Qdrant for DEV
+ * - (no prefix) -> Default SQLite + sqlite-vec (backward compatible)
  */
 export function resolveConfig(
   dbPath?: string,
   vecLibPath?: string
 ): Config {
-  const config: Config = {
-    dbPath: dbPath || env.CONTEXT_WHISPER_DB_PATH || getDefaultDbPath(),
-    vecLibPath: vecLibPath || findVecLib(),
-  };
+  // Base config (backward compatible defaults)
+  const baseDbPath = dbPath || env.CONTEXT_WHISPER_DB_PATH || getDefaultDbPath();
+  const baseVecLibPath = vecLibPath || findVecLib();
 
-  // Ensure parent directory exists for database
-  const dir = dirname(config.dbPath);
+  // Ensure parent directory exists for default database
+  const dir = dirname(baseDbPath);
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
 
-  return config;
+  // Parse multi-environment configurations from env vars
+  const defaults = { dbPath: baseDbPath, vecLibPath: baseVecLibPath };
+  const environmentConfigs = parseAllEnvironmentConfigs(env as Record<string, string | undefined>, defaults);
+
+  // If no environments configured, use default SQLite
+  if (environmentConfigs.size === 0) {
+    const defaultConfig = createDefaultSQLiteConfig(baseDbPath, baseVecLibPath);
+    environmentConfigs.set('default', defaultConfig);
+  }
+
+  // Determine default environment
+  // Priority: CONTEXT_WHISPER_ENV > first environment > 'default'
+  let defaultEnvironment = env.CONTEXT_WHISPER_ENV || 'default';
+  if (!environmentConfigs.has(defaultEnvironment)) {
+    defaultEnvironment = environmentConfigs.keys().next().value || 'default';
+  }
+
+  return {
+    dbPath: baseDbPath,
+    vecLibPath: baseVecLibPath,
+    environments: environmentConfigs,
+    defaultEnvironment,
+  };
 }
 
+/**
+ * Get environment configuration by name
+ */
+export function getEnvironmentConfig(
+  config: Config,
+  envName?: string
+): EnvironmentConfig | null {
+  const name = envName || config.defaultEnvironment;
+  return config.environments.get(name) || null;
+}
+
+/**
+ * List all available environments
+ */
+export function listEnvironments(config: Config): string[] {
+  return Array.from(config.environments.keys());
+}
+
+/**
+ * Check if an environment exists
+ */
+export function hasEnvironment(config: Config, envName: string): boolean {
+  return config.environments.has(envName);
+}
+
+/**
+ * Get database type description for logging
+ */
+export function getDbTypeDescription(envConfig: EnvironmentConfig): string {
+  const relType = envConfig.relational.type;
+  const vecType = envConfig.vector.type;
+  
+  if (relType === vecType.replace('-vec', '').replace('pg', 'postgres')) {
+    // All-in-one (SQLite + sqlite-vec or PostgreSQL + pgvector)
+    return `${relType.toUpperCase()} + ${vecType}`;
+  }
+  
+  // Split storage
+  return `${relType.toUpperCase()} (relational) + ${vecType} (vectors)`;
+}
