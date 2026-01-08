@@ -1,11 +1,21 @@
 import { spawn } from 'child_process';
-import { readFileSync } from 'fs';
+import { existsSync } from 'fs';
+import path from 'path';
 
 // Test the health tool via MCP protocol
-const server = spawn('npx', ['-y', 'tsx', 'src/index.ts'], {
+// Prefer running the built CLI (dist/) to match real npx usage; fall back to tsx for dev.
+const distEntry = path.join(process.cwd(), 'dist', 'index.js');
+const useDist = existsSync(distEntry);
+
+const server = useDist
+  ? spawn('node', [distEntry], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      cwd: process.cwd(),
+    })
+  : spawn('npx', ['-y', 'tsx', 'src/index.ts'], {
   stdio: ['pipe', 'pipe', 'pipe'],
   cwd: process.cwd()
-});
+    });
 
 let output = '';
 let errorOutput = '';
