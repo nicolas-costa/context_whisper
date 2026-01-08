@@ -86,10 +86,13 @@ const GetNoteSchema = z.object({
 const SearchNotesSchema = z.object({
   environment: z.string().optional(),
   query: z.string(),
-  repo_url: z.string().optional(),
+  /**
+   * Optional repo filter. If provided, search is scoped to that repository (and workspace/project are derived from it).
+   */
+  repo_url: z.string().nullable().optional(),
   top_k: z.number().int().positive().optional(),
   tags: z.array(z.string()).optional(),
-  review_status: z.string().nullable().optional(),
+  review_status: z.enum(['DRAFT', 'APPROVED']).nullable().optional(),
   workspace: z.string().optional(),
   project: z.string().optional(),
 });

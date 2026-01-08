@@ -72,12 +72,28 @@ setTimeout(() => {
     server.stdin.write(JSON.stringify(healthRequest) + '\n');
     
     setTimeout(() => {
+      // Also sanity-check search_notes contract: allow global search without repo_url
+      const globalSearchRequest = {
+        jsonrpc: '2.0',
+        id: 4,
+        method: 'tools/call',
+        params: {
+          name: 'search_notes',
+          arguments: {
+            query: 'health check global search',
+          }
+        }
+      };
+      server.stdin.write(JSON.stringify(globalSearchRequest) + '\n');
+
+      setTimeout(() => {
       console.log('=== STDOUT ===');
       console.log(output);
       console.log('\n=== STDERR ===');
       console.log(errorOutput);
       server.kill();
       process.exit(0);
+      }, 1500);
     }, 2000);
   }, 1000);
 }, 1000);

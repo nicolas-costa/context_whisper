@@ -253,6 +253,7 @@ Busca notas usando similaridade semântica vetorial.
 **Payload:**
 ```json
 {
+  "environment": "LOCAL",
   "query": "refresh token expiração",
   "top_k": 5,
   "tags": ["backend"],
@@ -261,7 +262,7 @@ Busca notas usando similaridade semântica vetorial.
 }
 ```
 
-**Nota:** `repo_url` é opcional - se não fornecido, busca em todos os repositórios.
+**Nota:** `repo_url` é opcional. Se `repo_url` não for fornecido, a busca é **global** (todos os repositórios).
 
 ### list_topics
 
