@@ -103,11 +103,34 @@ export async function createDatabaseAdapter(
 
 /**
  * Parse environment name prefix from key
- * Example: PROD_MYSQL_HOST -> PROD
+ * Examples: 
+ *   PROD_PG_HOST -> PROD
+ *   ACME_CORP_MYSQL_HOST -> ACME_CORP
+ *   LOCAL_SQLITE_PATH -> LOCAL
+ * 
+ * The key must end with one of the known suffixes:
+ *   _SQLITE_PATH, _PG_HOST, _PG_USER, etc., _MYSQL_HOST, etc., _QDRANT_HOST, etc.
  */
 export function parseEnvironmentPrefix(key: string): string | null {
-  const match = key.match(/^([A-Z0-9]+)_(SQLITE|PG|MYSQL|QDRANT)_/);
-  return match ? match[1] : null;
+  // Known suffixes that indicate a database config
+  const suffixes = [
+    '_SQLITE_PATH',
+    '_PG_HOST', '_PG_PORT', '_PG_USER', '_PG_PASSWORD', '_PG_DATABASE', '_PG_SSL',
+    '_MYSQL_HOST', '_MYSQL_PORT', '_MYSQL_USER', '_MYSQL_PASSWORD', '_MYSQL_DATABASE', '_MYSQL_SSL',
+    '_QDRANT_HOST', '_QDRANT_PORT', '_QDRANT_API_KEY', '_QDRANT_COLLECTION', '_QDRANT_HTTPS',
+    '_VECTOR_STORE',
+  ];
+  
+  for (const suffix of suffixes) {
+    if (key.endsWith(suffix)) {
+      const prefix = key.slice(0, key.length - suffix.length);
+      if (prefix && /^[A-Z0-9_]+$/.test(prefix)) {
+        return prefix;
+      }
+    }
+  }
+  
+  return null;
 }
 
 /**

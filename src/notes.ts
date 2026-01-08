@@ -1,7 +1,5 @@
-import type Database from 'better-sqlite3';
-import * as db from './db.js';
+import type { DatabaseAdapter, Note, NoteLink, SearchResult } from './db.js';
 import * as embeds from './embeds.js';
-import type { Note, NoteLink, SearchResult } from './db.js';
 import { detectContext, type DetectedContext } from './context-detector.js';
 
 export interface UpsertNoteParams {
@@ -78,7 +76,6 @@ export interface UpdateNoteMetaParams {
   topic: string;
   subtopic?: string | null;
   review_status: 'DRAFT' | 'APPROVED';
-  // Optional safety: if provided, we verify the note matches this scope
   workspace?: string;
   project?: string;
 }
@@ -91,26 +88,15 @@ export interface UpdateNoteMetaResult {
 /**
  * Parse markdown to extract code links
  * Format: [text](code:path/to/file.ext:start-end)
- * Optional params: symbol=name, commit=sha
  */
 function parseCodeLinksFromMarkdown(bodyMd: string): Array<Partial<NoteLink>> {
   const links: Array<Partial<NoteLink>> = [];
   const lines = bodyMd.split('\n');
   
-  // Regex for [text](code:path:lines) format
-  // Capture groups:
-  // 1: text
-  // 2: path
-  // 3: start line (optional)
-  // 4: end line (optional)
-  // 5: extra params (optional, e.g., :symbol=foo:commit=bar)
   const linkRegex = /\[([^\]]+)\]\(code:([^:\)]+)(?::(\d+)-(\d+))?((?::[^:\)]+)*)\)/g;
 
   lines.forEach((line, lineIndex) => {
     let match;
-    // Reset lastIndex for each line as we're reusing the regex object in a loop? 
-    // No, we create a new match loop per line, but linkRegex is global stateful if reused.
-    // Better to re-instantiate or reset lastIndex.
     linkRegex.lastIndex = 0;
     
     while ((match = linkRegex.exec(line)) !== null) {
@@ -119,13 +105,12 @@ function parseCodeLinksFromMarkdown(bodyMd: string): Array<Partial<NoteLink>> {
       const link: Partial<NoteLink> = {
         path: path,
         markdown_context: line.trim(),
-        markdown_line: lineIndex + 1, // 1-based line number
+        markdown_line: lineIndex + 1,
       };
 
       if (startStr) link.line_start = parseInt(startStr, 10);
       if (endStr) link.line_end = parseInt(endStr, 10);
 
-      // Parse extra params
       if (extraParams) {
         const params = extraParams.split(':').filter(Boolean);
         params.forEach(param => {
@@ -146,14 +131,12 @@ function parseCodeLinksFromMarkdown(bodyMd: string): Array<Partial<NoteLink>> {
 
 /**
  * Upsert a note: creates or updates note, generates embedding, and stores vector
- * Auto-detects context if workspace/project not provided
  */
 export async function upsertNote(
-  database: Database.Database,
+  adapter: DatabaseAdapter,
   params: UpsertNoteParams,
   cwd?: string
 ): Promise<UpsertNoteResult> {
-  // Detect context automatically
   const context = detectContext(
     {
       workspace: params.workspace,
@@ -163,77 +146,59 @@ export async function upsertNote(
     cwd
   );
 
-  // Use detected or provided repo_url
-  const repoUrl = params.repo_url || context.repo_url;
-
-  // Convert tags array to JSON string
   const tagsJson = params.tags && params.tags.length > 0 
     ? JSON.stringify(params.tags) 
     : null;
 
-  // Generate embedding from body_md
   const embedding = await embeds.embed(params.body_md);
 
-  // Extract links from markdown
   const markdownLinks = parseCodeLinksFromMarkdown(params.body_md);
-  
-  // Merge with explicit links provided in params
-  // Explicit links take precedence if valid, but we usually just append them
-  // We'll combine both arrays
   const allLinks = [...markdownLinks, ...(params.links || [])];
 
-  // Execute upsert in transaction
-  const result = database.transaction(() => {
-    // Upsert note with repo metadata
-    const noteId = db.upsertNote(
-      database,
-      context.workspace,
-      context.project,
-      params.topic,
-      params.subtopic || null,
-      tagsJson,
-      params.body_md,
-      params.created_by || null,
-      params.review_status || 'DRAFT',
-      context.repo_url ?? undefined,
-      context.repo_fingerprint ?? undefined,
-      context.repo_provider ?? undefined,
-      context.repo_owner ?? undefined,
-      context.repo_name ?? undefined
-    );
+  // Upsert note
+  const noteId = await adapter.relational.upsertNote({
+    workspace: context.workspace,
+    project: context.project,
+    topic: params.topic,
+    subtopic: params.subtopic || null,
+    tagsJson,
+    bodyMd: params.body_md,
+    createdBy: params.created_by || null,
+    reviewStatus: params.review_status || 'DRAFT',
+    repoUrl: context.repo_url ?? undefined,
+    repoFingerprint: context.repo_fingerprint ?? undefined,
+    repoProvider: context.repo_provider ?? undefined,
+    repoOwner: context.repo_owner ?? undefined,
+    repoName: context.repo_name ?? undefined,
+  });
 
-    // Upsert vector
-    db.upsertVector(database, noteId, embedding);
+  // Upsert vector
+  await adapter.vector.upsertVector(noteId, embedding);
 
-    // Upsert combined links
-    if (allLinks.length > 0) {
-      db.upsertNoteLinks(database, noteId, allLinks);
-    }
+  // Upsert links
+  if (allLinks.length > 0) {
+    await adapter.relational.upsertNoteLinks(noteId, allLinks);
+  }
 
-    // Update repo_paths if we have fingerprint
-    if (context.repo_fingerprint && cwd) {
-      db.upsertRepoPath(database, context.repo_fingerprint, cwd);
-    }
-
-    return { note_id: noteId };
-  })();
+  // Update repo_paths if we have fingerprint
+  if (context.repo_fingerprint && cwd) {
+    await adapter.relational.upsertRepoPath(context.repo_fingerprint, cwd);
+  }
 
   return {
-    note_id: result.note_id,
+    note_id: noteId,
     context,
   };
 }
 
 /**
  * Get a note by its unique key
- * Auto-detects context if workspace/project not provided
  */
-export function getNote(
-  database: Database.Database,
+export async function getNote(
+  adapter: DatabaseAdapter,
   params: GetNoteParams,
   cwd?: string
-): GetNoteResult {
-  // Detect context automatically
+): Promise<GetNoteResult> {
   const context = detectContext(
     {
       workspace: params.workspace,
@@ -242,8 +207,7 @@ export function getNote(
     cwd
   );
 
-  const note = db.getNote(
-    database,
+  const note = await adapter.relational.getNote(
     context.workspace,
     context.project,
     params.topic,
@@ -251,8 +215,7 @@ export function getNote(
   );
 
   if (note) {
-    // Fetch associated links
-    const links = db.getNoteLinks(database, note.note_id);
+    const links = await adapter.relational.getNoteLinks(note.note_id);
     return { 
       note: { ...note, links }, 
       context 
@@ -264,14 +227,12 @@ export function getNote(
 
 /**
  * Search notes using semantic similarity
- * Auto-detects context if workspace/project not provided
  */
 export async function searchNotes(
-  database: Database.Database,
+  adapter: DatabaseAdapter,
   params: SearchNotesParams,
   cwd?: string
 ): Promise<SearchNotesResult> {
-  // Detect context automatically
   const context = detectContext(
     {
       workspace: params.workspace,
@@ -281,27 +242,22 @@ export async function searchNotes(
     cwd
   );
 
-  // Generate embedding for query
   const queryEmbedding = await embeds.embed(params.query);
 
-  // Use repo info from context
   const repoFingerprint = params.global ? undefined : (context.repo_fingerprint ?? undefined);
   const repoUrl = params.global ? undefined : (params.repo_url ?? context.repo_url ?? undefined);
   const workspace = params.global ? null : context.workspace;
   const project = params.global ? null : (params.project || context.project || null);
 
-  // Perform KNN search
-  const results = db.searchNotes(
-    database,
-    queryEmbedding,
+  const results = await adapter.searchNotes(queryEmbedding, {
     workspace,
     project,
-    params.top_k || 5,
-    params.tags || null,
-    params.review_status || null,
+    topK: params.top_k || 5,
+    tags: params.tags || null,
+    reviewStatus: params.review_status || null,
     repoFingerprint,
-    repoUrl
-  );
+    repoUrl,
+  });
 
   return {
     notes: results,
@@ -311,14 +267,12 @@ export async function searchNotes(
 
 /**
  * List all topics for a workspace/project
- * Auto-detects context if workspace/project not provided
  */
-export function listTopics(
-  database: Database.Database,
+export async function listTopics(
+  adapter: DatabaseAdapter,
   params: ListTopicsParams,
   cwd?: string
-): ListTopicsResult {
-  // Detect context automatically
+): Promise<ListTopicsResult> {
   const context = detectContext(
     {
       workspace: params.workspace,
@@ -328,7 +282,7 @@ export function listTopics(
     cwd
   );
 
-  const topics = db.listTopics(database, context.workspace, context.project);
+  const topics = await adapter.relational.listTopics(context.workspace, context.project);
 
   return {
     topics,
@@ -338,14 +292,12 @@ export function listTopics(
 
 /**
  * Delete a note and all its associated data
- * Auto-detects context if workspace/project not provided
  */
-export function deleteNote(
-  database: Database.Database,
+export async function deleteNote(
+  adapter: DatabaseAdapter,
   params: DeleteNoteParams,
   cwd?: string
-): DeleteNoteResult {
-  // Detect context automatically
+): Promise<DeleteNoteResult> {
   const context = detectContext(
     {
       workspace: params.workspace,
@@ -354,8 +306,7 @@ export function deleteNote(
     cwd
   );
 
-  const deleted = db.deleteNote(
-    database,
+  const deleted = await adapter.relational.deleteNote(
     context.workspace,
     context.project,
     params.topic,
@@ -369,15 +320,14 @@ export function deleteNote(
 }
 
 /**
- * Update note metadata by note_id (topic/subtopic/review_status).
- * This is intentionally scoped by note_id to avoid ambiguity and to support renames.
+ * Update note metadata by note_id
  */
-export function updateNoteMeta(
-  database: Database.Database,
+export async function updateNoteMeta(
+  adapter: DatabaseAdapter,
   params: UpdateNoteMetaParams,
   cwd?: string
-): UpdateNoteMetaResult {
-  const existing = db.getNoteById(database, params.note_id);
+): Promise<UpdateNoteMetaResult> {
+  const existing = await adapter.relational.getNoteById(params.note_id);
   if (!existing) {
     const context = detectContext(
       {
@@ -389,7 +339,6 @@ export function updateNoteMeta(
     return { note: null, context };
   }
 
-  // Optional scope validation: prevents accidental cross-note edits when caller supplies ws/proj
   if (params.workspace && existing.workspace !== params.workspace) {
     const context = detectContext({ workspace: existing.workspace, project: existing.project, repo_url: existing.repo_url ?? undefined }, cwd);
     return { note: null, context };
@@ -399,8 +348,7 @@ export function updateNoteMeta(
     return { note: null, context };
   }
 
-  const updated = db.updateNoteMeta(
-    database,
+  const updated = await adapter.relational.updateNoteMeta(
     params.note_id,
     params.topic,
     params.subtopic ?? null,

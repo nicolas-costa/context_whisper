@@ -4,8 +4,8 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { program } from 'commander';
 import { resolveConfig, getEnvironmentConfig, listEnvironments, getDbTypeDescription } from './config.js';
-import { openDB, initSchema } from './db.js';
-import { setupMCPServer, getSystemPrompt } from './mcp.js';
+import { createDatabaseManager } from './db.js';
+import { setupMCPServer } from './mcp.js';
 
 const VERSION = '1.4.0';
 
@@ -16,7 +16,7 @@ async function main() {
     .version(VERSION)
     .option('--db <path>', 'Path to SQLite database file')
     .option('--vec-lib <path>', 'Path to sqlite-vec extension library')
-    .option('--env <name>', 'Environment name to use (e.g., LOCAL, ACME_CORP, STARTUP_XYZ)')
+    .option('--env <name>', 'Default environment name to use (e.g., LOCAL, ACME_CORP, STARTUP_XYZ)')
     .parse(process.argv);
 
   const options = program.opts();
@@ -27,46 +27,39 @@ async function main() {
     options.vecLib
   );
 
-  // Override default environment if specified
-  const envName = options.env || config.defaultEnvironment;
+  // Override default environment if specified via CLI
+  if (options.env) {
+    if (config.environments.has(options.env)) {
+      // Update the default environment
+      (config as any).defaultEnvironment = options.env;
+    } else {
+      console.error(`[context-whisper] ERROR: Environment '${options.env}' not configured.`);
+      console.error(`[context-whisper] Available environments: ${listEnvironments(config).join(', ')}`);
+      process.exit(1);
+    }
+  }
 
   // Log startup information
   console.error(`[context-whisper] Starting MCP server v${VERSION}...`);
   
   // Show configured environments
   const environments = listEnvironments(config);
-  if (environments.length > 1 || !environments.includes('default')) {
-    console.error(`[context-whisper] Configured environments: ${environments.join(', ')}`);
-    console.error(`[context-whisper] Active environment: ${envName}`);
-  }
+  console.error(`[context-whisper] Configured environments: ${environments.join(', ')}`);
+  console.error(`[context-whisper] Default environment: ${config.defaultEnvironment}`);
 
-  // Get environment configuration
-  const envConfig = getEnvironmentConfig(config, envName);
-  
-  if (envConfig) {
-    const dbDescription = getDbTypeDescription(envConfig);
-    console.error(`[context-whisper] Database: ${dbDescription}`);
-    
-    // Show specific config based on type
-    if (envConfig.relational.type === 'sqlite') {
-      console.error(`[context-whisper] SQLite path: ${envConfig.relational.path}`);
-    } else if (envConfig.relational.type === 'postgres') {
-      console.error(`[context-whisper] PostgreSQL: ${envConfig.relational.host}:${envConfig.relational.port}/${envConfig.relational.database}`);
-    } else if (envConfig.relational.type === 'mysql') {
-      console.error(`[context-whisper] MySQL: ${envConfig.relational.host}:${envConfig.relational.port}/${envConfig.relational.database}`);
+  // Show details for each environment
+  for (const envName of environments) {
+    const envConfig = getEnvironmentConfig(config, envName);
+    if (envConfig) {
+      const dbDescription = getDbTypeDescription(envConfig);
+      const isDefault = envName === config.defaultEnvironment ? ' (default)' : '';
+      console.error(`[context-whisper]   ${envName}${isDefault}: ${dbDescription}`);
     }
-    
-    if (envConfig.vector.type === 'qdrant') {
-      const qdrantConfig = envConfig.vector.config as any;
-      console.error(`[context-whisper] Qdrant: ${qdrantConfig.host}:${qdrantConfig.port}`);
-    }
-  } else {
-    // Fallback to legacy SQLite config
-    console.error(`[context-whisper] Database: ${config.dbPath}`);
   }
 
   // Check for sqlite-vec when using SQLite
-  if (!envConfig || envConfig.relational.type === 'sqlite') {
+  const defaultEnvConfig = getEnvironmentConfig(config, config.defaultEnvironment);
+  if (defaultEnvConfig?.relational.type === 'sqlite' && defaultEnvConfig?.vector.type === 'sqlite-vec') {
     if (!config.vecLibPath) {
       console.error(`[context-whisper] ERROR: sqlite-vec extension not found.`);
       console.error(`[context-whisper] Vector search is REQUIRED for RAG functionality.`);
@@ -78,10 +71,12 @@ async function main() {
   }
 
   try {
-    // Open database using legacy API (backward compatible)
-    // For multi-database support, the MCP handlers could be updated to use adapters
-    const db = openDB(config.dbPath, config.vecLibPath);
-    initSchema(db);
+    // Create database manager with lazy initialization
+    const dbManager = createDatabaseManager(config.environments, config.defaultEnvironment);
+
+    // Pre-initialize the default environment to catch config errors early
+    console.error(`[context-whisper] Initializing default environment: ${config.defaultEnvironment}...`);
+    await dbManager.getAdapter(config.defaultEnvironment);
 
     // Create MCP server
     const server = new Server(
@@ -97,14 +92,28 @@ async function main() {
       }
     );
 
-    // Setup tools
-    setupMCPServer(server, db);
+    // Setup tools with database manager
+    setupMCPServer(server, dbManager);
 
     // Create transport and connect
     const transport = new StdioServerTransport();
     await server.connect(transport);
 
     console.error(`[context-whisper] MCP server ready`);
+
+    // Handle graceful shutdown
+    process.on('SIGINT', async () => {
+      console.error(`[context-whisper] Shutting down...`);
+      await dbManager.closeAll();
+      process.exit(0);
+    });
+
+    process.on('SIGTERM', async () => {
+      console.error(`[context-whisper] Shutting down...`);
+      await dbManager.closeAll();
+      process.exit(0);
+    });
+
   } catch (error) {
     console.error(`[context-whisper] Error:`, error);
     process.exit(1);

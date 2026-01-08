@@ -2,9 +2,10 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { openDB } from '../db.js';
+import { openSQLiteDatabase } from '../db.js';
 import * as notes from '../notes.js';
-import { resolveConfig } from '../config.js';
+import { resolveConfig, getEnvironmentConfig } from '../config.js';
+import { createDatabaseAdapter } from '../db/factory.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,11 +14,26 @@ const __dirname = path.dirname(__filename);
 const args = process.argv.slice(2);
 const dbPath = args[0];
 const cwd = args[1] || process.cwd();
-const vecLibPath = process.env.CONTEXT_WHISPER_VEC_LIB;
+const envName = args[2] || undefined;
 
-// Initialize DB
-const config = resolveConfig(dbPath, vecLibPath);
-const db = openDB(config.dbPath, config.vecLibPath);
+// Initialize DB using adapter system
+const config = resolveConfig(dbPath, process.env.CONTEXT_WHISPER_VEC_LIB);
+
+// Determine which environment to use
+const targetEnv = envName || config.defaultEnvironment;
+const envConfig = getEnvironmentConfig(config, targetEnv);
+
+let adapterPromise: Promise<any>;
+
+if (envConfig) {
+  // Use the configured environment
+  adapterPromise = createDatabaseAdapter(envConfig);
+} else {
+  // Fallback to default SQLite
+  adapterPromise = Promise.resolve(
+    openSQLiteDatabase({ type: 'sqlite', path: config.dbPath, vecLibPath: config.vecLibPath }, 'default').adapter
+  );
+}
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
@@ -45,6 +61,9 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
+    // Get adapter (wait for initialization)
+    const adapter = await adapterPromise;
+    
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
     
     // API Routes
@@ -55,7 +74,7 @@ const server = http.createServer(async (req, res) => {
         const workspace = url.searchParams.get('workspace') || undefined;
         const project = url.searchParams.get('project') || undefined;
         
-        const result = notes.listTopics(db, { workspace, project }, cwd);
+        const result = await notes.listTopics(adapter, { workspace, project }, cwd);
         res.end(JSON.stringify({ ok: true, ...result }));
         return;
       }
@@ -73,7 +92,7 @@ const server = http.createServer(async (req, res) => {
         const global = url.searchParams.get('global') === 'true';
         
         const result = await notes.searchNotes(
-          db,
+          adapter,
           { query: q, workspace, project, global },
           cwd
         );
@@ -121,13 +140,13 @@ const server = http.createServer(async (req, res) => {
         }
 
         try {
-          const result = notes.updateNoteMeta(
-            db,
+          const result = await notes.updateNoteMeta(
+            adapter,
             {
               note_id,
               topic,
               subtopic: subtopic ? subtopic : null,
-              review_status,
+              review_status: review_status as 'DRAFT' | 'APPROVED',
               workspace,
               project,
             },
@@ -168,8 +187,8 @@ const server = http.createServer(async (req, res) => {
         const workspace = url.searchParams.get('workspace') || undefined;
         const project = url.searchParams.get('project') || undefined;
         
-        const result = notes.getNote(
-          db,
+        const result = await notes.getNote(
+          adapter,
           { topic, subtopic, workspace, project },
           cwd
         );
@@ -236,13 +255,18 @@ process.on('message', (msg) => {
   }
 });
 
-// Start
-server.listen(0, '127.0.0.1', () => {
-  const addr = server.address() as any;
-  const port = addr.port;
-  if (process.send) {
-    process.send({ type: 'ready', port, url: `http://127.0.0.1:${port}` });
-  } else {
-    console.log(`Server listening on http://127.0.0.1:${port}`);
-  }
+// Start server after adapter is ready
+adapterPromise.then(() => {
+  server.listen(0, '127.0.0.1', () => {
+    const addr = server.address() as any;
+    const port = addr.port;
+    if (process.send) {
+      process.send({ type: 'ready', port, url: `http://127.0.0.1:${port}` });
+    } else {
+      console.log(`Server listening on http://127.0.0.1:${port}`);
+    }
+  });
+}).catch(err => {
+  console.error('Failed to initialize adapter:', err);
+  process.exit(1);
 });
