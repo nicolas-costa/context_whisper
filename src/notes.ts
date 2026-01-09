@@ -283,30 +283,91 @@ export function getNoteById(
   params: GetNoteByIdParams,
   cwd?: string
 ): GetNoteByIdResult {
-  const context = detectContext(
-    {
-      workspace: params.workspace,
-      project: params.project,
-      repo_url: params.repo_url || undefined,
-    },
-    cwd
-  );
-
   const note = db.getNoteById(database, params.note_id);
-  if (!note) return { note: null, context };
-
-  // Hard scope check: note must match derived workspace/project.
-  if (note.workspace !== context.workspace || note.project !== context.project) {
-    return { note: null, context };
+  if (!note) {
+    // We cannot safely "detect" here without repo_url; return a minimal, explicit context.
+    return {
+      note: null,
+      context: {
+        workspace: params.workspace ?? 'unknown',
+        project: params.project ?? 'unknown',
+        repo_url: params.repo_url ?? undefined,
+        confidence: 0.3,
+        inferred: true,
+        source: 'default',
+      },
+    };
   }
 
-  // If both are known, require exact repo_url match.
-  if (note.repo_url && context.repo_url && note.repo_url !== context.repo_url) {
-    return { note: null, context };
+  // Optional scoping: if caller provides scope, enforce it.
+  if (params.workspace && note.workspace !== params.workspace) {
+    return {
+      note: null,
+      context: {
+        workspace: note.workspace,
+        project: note.project,
+        repo_url: note.repo_url ?? undefined,
+        repo_provider: note.repo_provider ?? undefined,
+        repo_owner: note.repo_owner ?? undefined,
+        repo_name: note.repo_name ?? undefined,
+        repo_fingerprint: note.repo_fingerprint ?? undefined,
+        confidence: 1.0,
+        inferred: false,
+        source: 'payload',
+      },
+    };
+  }
+  if (params.project && note.project !== params.project) {
+    return {
+      note: null,
+      context: {
+        workspace: note.workspace,
+        project: note.project,
+        repo_url: note.repo_url ?? undefined,
+        repo_provider: note.repo_provider ?? undefined,
+        repo_owner: note.repo_owner ?? undefined,
+        repo_name: note.repo_name ?? undefined,
+        repo_fingerprint: note.repo_fingerprint ?? undefined,
+        confidence: 1.0,
+        inferred: false,
+        source: 'payload',
+      },
+    };
+  }
+  if (params.repo_url && note.repo_url && note.repo_url !== params.repo_url) {
+    return {
+      note: null,
+      context: {
+        workspace: note.workspace,
+        project: note.project,
+        repo_url: note.repo_url ?? undefined,
+        repo_provider: note.repo_provider ?? undefined,
+        repo_owner: note.repo_owner ?? undefined,
+        repo_name: note.repo_name ?? undefined,
+        repo_fingerprint: note.repo_fingerprint ?? undefined,
+        confidence: 1.0,
+        inferred: false,
+        source: 'payload',
+      },
+    };
   }
 
   const links = db.getNoteLinks(database, note.note_id);
-  return { note: { ...note, links }, context };
+  return {
+    note: { ...note, links },
+    context: {
+      workspace: note.workspace,
+      project: note.project,
+      repo_url: note.repo_url ?? undefined,
+      repo_provider: note.repo_provider ?? undefined,
+      repo_owner: note.repo_owner ?? undefined,
+      repo_name: note.repo_name ?? undefined,
+      repo_fingerprint: note.repo_fingerprint ?? undefined,
+      confidence: 1.0,
+      inferred: false,
+      source: 'payload',
+    },
+  };
 }
 
 /**
