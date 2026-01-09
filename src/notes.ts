@@ -34,6 +34,18 @@ export interface GetNoteResult {
   context: DetectedContext;
 }
 
+export interface GetNoteByIdParams {
+  workspace?: string;
+  project?: string;
+  repo_url?: string | null;
+  note_id: number;
+}
+
+export interface GetNoteByIdResult {
+  note: (Note & { links?: NoteLink[] }) | null;
+  context: DetectedContext;
+}
+
 export interface SearchNotesParams {
   workspace?: string;
   query: string;
@@ -260,6 +272,41 @@ export function getNote(
   }
 
   return { note: null, context };
+}
+
+/**
+ * Get a note by its numeric ID, scoped to a workspace/project (and optionally repo_url) for safety.
+ * This prevents callers from exfiltrating notes from other repositories just by guessing IDs.
+ */
+export function getNoteById(
+  database: Database.Database,
+  params: GetNoteByIdParams,
+  cwd?: string
+): GetNoteByIdResult {
+  const context = detectContext(
+    {
+      workspace: params.workspace,
+      project: params.project,
+      repo_url: params.repo_url || undefined,
+    },
+    cwd
+  );
+
+  const note = db.getNoteById(database, params.note_id);
+  if (!note) return { note: null, context };
+
+  // Hard scope check: note must match derived workspace/project.
+  if (note.workspace !== context.workspace || note.project !== context.project) {
+    return { note: null, context };
+  }
+
+  // If both are known, require exact repo_url match.
+  if (note.repo_url && context.repo_url && note.repo_url !== context.repo_url) {
+    return { note: null, context };
+  }
+
+  const links = db.getNoteLinks(database, note.note_id);
+  return { note: { ...note, links }, context };
 }
 
 /**

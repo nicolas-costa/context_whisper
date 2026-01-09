@@ -106,6 +106,11 @@ const GetNoteSchema = z.object({
   subtopic: z.string().nullable().optional(),
 });
 
+const GetNoteByIdSchema = z.object({
+  repo_url: z.string(),
+  note_id: z.number().int().positive(),
+});
+
 const SearchNotesSchema = z.object({
   query: z.string(),
   repo_url: z.string().optional(), // Optional for global search
@@ -279,6 +284,21 @@ export function setupMCPServer(server: Server, database: Database.Database): voi
               subtopic: { type: 'string', description: 'Subtópico opcional', nullable: true },
             },
             required: ['repo_url', 'topic'],
+          },
+        },
+        {
+          name: 'get_note_by_id',
+          description: 'Recupera uma nota técnica por note_id (escopado por repo_url para evitar leitura cross-repo).',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              repo_url: {
+                type: 'string',
+                description: 'REQUIRED. Full git repository URL onde a nota está armazenada (usado para escopo/segurança).'
+              },
+              note_id: { type: 'number', description: 'ID numérico da nota (note_id)' },
+            },
+            required: ['repo_url', 'note_id'],
           },
         },
         {
@@ -511,6 +531,70 @@ export function setupMCPServer(server: Server, database: Database.Database): voi
           }
           
           // Parse tags_json back to array
+          const noteWithParsedTags = {
+            ...result.note,
+            tags: result.note.tags_json ? JSON.parse(result.note.tags_json) : null,
+            tags_json: undefined,
+          };
+
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  ok: true,
+                  context: result.context,
+                  note: noteWithParsedTags,
+                }, null, 2),
+              },
+            ],
+          };
+        }
+
+        case 'get_note_by_id': {
+          const rawParams = GetNoteByIdSchema.parse(args);
+
+          // Validate required repo_url and derive workspace/project
+          const validation = validateRequiredContext({
+            repo_url: rawParams.repo_url,
+          });
+
+          if (!validation.valid) {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(validation.error, null, 2),
+                },
+              ],
+              isError: true,
+            };
+          }
+
+          const paramsWithContext = {
+            ...rawParams,
+            workspace: validation.context!.workspace,
+            project: validation.context!.project,
+          };
+
+          const result = notes.getNoteById(database, paramsWithContext as notes.GetNoteByIdParams, cwd);
+
+          if (!result.note) {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    ok: false,
+                    error: 'Note not found',
+                    context: result.context,
+                  }, null, 2),
+                },
+              ],
+              isError: true,
+            };
+          }
+
           const noteWithParsedTags = {
             ...result.note,
             tags: result.note.tags_json ? JSON.parse(result.note.tags_json) : null,
