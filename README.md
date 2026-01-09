@@ -121,6 +121,23 @@ Recupera uma nota específica do repositório.
 
 **Nota:** `repo_url` é obrigatório.
 
+### get_note_by_id
+
+Recupera uma nota por `note_id`.
+
+**Payload:**
+```json
+{
+  "repo_url": "https://github.com/workspace/qualquer-repo-do-workspace",
+  "note_id": 123
+}
+```
+
+**Notas importantes (escopo e segurança):**
+- `repo_url` é obrigatório **apenas para derivar o `workspace`**.
+- A busca por `note_id` é **escopada por workspace** (cross-project): permite ler notas de outros repositórios **dentro do mesmo workspace** (ex: front lendo doc do back).
+- Isso é **potencialmente perigoso** em workspaces grandes: `note_id` é incremental, então um agente pode tentar enumerar IDs e “varrer” notas do workspace.
+
 ### search_notes
 
 Busca notas usando similaridade semântica vetorial. Busca global se repo_url não for especificado.

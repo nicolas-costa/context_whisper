@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.1] - 2026-01-09
+
+### Added
+- **MCP tool `get_note_by_id`**: Retrieve a note by numeric `note_id`, scoped to the derived `workspace` (cross-project reads within the same workspace).
+
 ## [1.3.0] - 2025-12-31
 
 ### Added

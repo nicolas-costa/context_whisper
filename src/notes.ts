@@ -299,42 +299,11 @@ export function getNoteById(
     };
   }
 
-  // Optional scoping: if caller provides scope, enforce it.
+  // Workspace scoping only (by design):
+  // - repo_url is used by the MCP layer to derive workspace
+  // - project/repo_url are intentionally NOT enforced here to allow cross-project reads
+  //   within the same workspace (e.g., front reading back docs).
   if (params.workspace && note.workspace !== params.workspace) {
-    return {
-      note: null,
-      context: {
-        workspace: note.workspace,
-        project: note.project,
-        repo_url: note.repo_url ?? undefined,
-        repo_provider: note.repo_provider ?? undefined,
-        repo_owner: note.repo_owner ?? undefined,
-        repo_name: note.repo_name ?? undefined,
-        repo_fingerprint: note.repo_fingerprint ?? undefined,
-        confidence: 1.0,
-        inferred: false,
-        source: 'payload',
-      },
-    };
-  }
-  if (params.project && note.project !== params.project) {
-    return {
-      note: null,
-      context: {
-        workspace: note.workspace,
-        project: note.project,
-        repo_url: note.repo_url ?? undefined,
-        repo_provider: note.repo_provider ?? undefined,
-        repo_owner: note.repo_owner ?? undefined,
-        repo_name: note.repo_name ?? undefined,
-        repo_fingerprint: note.repo_fingerprint ?? undefined,
-        confidence: 1.0,
-        inferred: false,
-        source: 'payload',
-      },
-    };
-  }
-  if (params.repo_url && note.repo_url && note.repo_url !== params.repo_url) {
     return {
       note: null,
       context: {
