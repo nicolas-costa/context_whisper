@@ -7,6 +7,7 @@ import pg from 'pg';
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { redactSecrets, truncate } from '../../security.js';
 import type {
   RelationalAdapter,
   VectorAdapter,
@@ -21,6 +22,12 @@ const { Pool } = pg;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+function escapeLike(input: string): string {
+  // Escape LIKE wildcards and escape char for Postgres patterns.
+  // We will pair this with: LIKE ... ESCAPE E'\\'
+  return input.replace(/[\\%_]/g, '\\$&');
+}
 
 /**
  * PostgreSQL Relational Adapter
@@ -79,32 +86,49 @@ export class PostgresRelationalAdapter implements RelationalAdapter {
   }
 
   private splitPostgresStatements(sql: string): string[] {
+    // Robust splitter that understands dollar-quoted bodies ($$ ... $$, $tag$ ... $tag$).
     const statements: string[] = [];
     let current = '';
-    let inFunction = false;
-    
-    const lines = sql.split('\n');
-    for (const line of lines) {
-      const trimmedLine = line.trim();
-      
-      // Track function/trigger blocks
-      if (trimmedLine.includes('$$')) {
-        inFunction = !inFunction;
+    let i = 0;
+    let currentDollarTag: string | null = null;
+
+    const isDollarTagChar = (c: string) => /[A-Za-z0-9_]/.test(c);
+
+    while (i < sql.length) {
+      // Detect dollar-quote tag at current position: $...$
+      if (sql[i] === '$') {
+        let j = i + 1;
+        while (j < sql.length && isDollarTagChar(sql[j])) j++;
+        if (j < sql.length && sql[j] === '$') {
+          const tag = sql.slice(i, j + 1); // includes both '$'
+          current += tag;
+          i = j + 1;
+
+          if (currentDollarTag === null) {
+            currentDollarTag = tag;
+          } else if (currentDollarTag === tag) {
+            currentDollarTag = null;
+          }
+          continue;
+        }
       }
-      
-      current += line + '\n';
-      
-      // End of statement (semicolon outside function block)
-      if (trimmedLine.endsWith(';') && !inFunction) {
-        statements.push(current.trim());
+
+      const ch = sql[i];
+      current += ch;
+
+      // Semicolon terminates only when not inside dollar-quoted block
+      if (ch === ';' && currentDollarTag === null) {
+        const trimmed = current.trim();
+        if (trimmed && !trimmed.startsWith('--')) {
+          statements.push(trimmed);
+        }
         current = '';
       }
+      i++;
     }
-    
-    if (current.trim()) {
-      statements.push(current.trim());
-    }
-    
+
+    const tail = current.trim();
+    if (tail) statements.push(tail);
     return statements;
   }
 
@@ -549,8 +573,10 @@ export class PostgresDatabaseAdapter implements DatabaseAdapter {
     if (options.tags && options.tags.length > 0) {
       const tagConditions: string[] = [];
       options.tags.forEach((tag) => {
-        tagConditions.push(`n.tags_json LIKE $${paramIndex++}`);
-        params.push(`%"${tag}"%`);
+        // Escape LIKE wildcard injection: tags are user input.
+        const escaped = escapeLike(tag);
+        tagConditions.push(`n.tags_json LIKE $${paramIndex++} ESCAPE E'\\\\'`);
+        params.push(`%"${escaped}"%`);
       });
       conditions.push(`(${tagConditions.join(' OR ')})`);
     }
@@ -614,7 +640,9 @@ export async function createPostgresAdapter(
     user: config.user,
     password: config.password,
     database: config.database,
-    ssl: config.ssl ? { rejectUnauthorized: false } : undefined,
+    ssl: config.ssl
+      ? { rejectUnauthorized: config.sslRejectUnauthorized ?? true }
+      : undefined,
   });
 
   // Test connection
@@ -622,7 +650,8 @@ export async function createPostgresAdapter(
     await pool.query('SELECT 1');
   } catch (error) {
     await pool.end();
-    throw new Error(`Failed to connect to PostgreSQL: ${error instanceof Error ? error.message : error}`);
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to connect to PostgreSQL: ${truncate(redactSecrets(msg), 500)}`);
   }
 
   return new PostgresDatabaseAdapter(pool, environmentName);

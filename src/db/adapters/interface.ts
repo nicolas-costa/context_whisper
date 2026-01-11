@@ -60,6 +60,11 @@ export interface PostgresConfig {
   password: string;
   database: string;
   ssl?: boolean;
+  /**
+   * When SSL is enabled, controls certificate validation.
+   * Default: true (secure). Set to false ONLY for local/dev with self-signed certs.
+   */
+  sslRejectUnauthorized?: boolean;
 }
 
 export interface MySQLConfig {
@@ -70,6 +75,11 @@ export interface MySQLConfig {
   password: string;
   database: string;
   ssl?: boolean;
+  /**
+   * When SSL is enabled, controls certificate validation.
+   * Default: true (secure). Set to false ONLY for local/dev with self-signed certs.
+   */
+  sslRejectUnauthorized?: boolean;
 }
 
 export interface QdrantConfig {
@@ -78,10 +88,20 @@ export interface QdrantConfig {
   apiKey?: string;
   collection?: string;
   https?: boolean;
+  /** Request timeout for Qdrant HTTP calls (default: 30000ms). */
+  timeoutMs?: number;
 }
 
 export interface EnvironmentConfig {
   name: string;
+  /**
+   * Workspace/tenant allowlist for this environment.
+   * Interpreted as repo_url "owner" (e.g., "nicolas-costa", "consultoria-a").
+   *
+   * If provided, the server can enforce that notes for a given repo workspace
+   * only route to environments that explicitly allow that workspace.
+   */
+  allowedWorkspaces?: string[];
   relational: SQLiteConfig | PostgresConfig | MySQLConfig;
   vector: {
     type: VectorStoreType;

@@ -205,7 +205,17 @@ export function resolveConfig(
 
   // If no environments configured, use default SQLite
   if (environmentConfigs.size === 0) {
-    const defaultConfig = createDefaultSQLiteConfig(baseDbPath, baseVecLibPath);
+    const raw = env.DEFAULT_WORKSPACE_WHITELIST;
+    const allowedWorkspaces = raw
+      ? raw.split(',').map(s => s.trim()).filter(Boolean)
+      : [];
+    if (allowedWorkspaces.length === 0) {
+      throw new Error(
+        `DEFAULT_WORKSPACE_WHITELIST is required when using the implicit 'default' environment ` +
+        `(e.g., DEFAULT_WORKSPACE_WHITELIST=\"nicolas-costa\").`
+      );
+    }
+    const defaultConfig = createDefaultSQLiteConfig(baseDbPath, baseVecLibPath, allowedWorkspaces);
     environmentConfigs.set('default', defaultConfig);
   }
 

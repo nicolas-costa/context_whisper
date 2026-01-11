@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import { execSync } from 'child_process';
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
@@ -77,7 +78,14 @@ const dbB = path.join(tempRoot, 'env_b.sqlite');
 
 const ENV_A = 'ACME_CORP';
 const ENV_B = 'STARTUP_XYZ';
-const REPO_URL = 'https://github.com/example-org/example-repo';
+const REPO_URL = execSync('git config --get remote.origin.url', { cwd: process.cwd(), encoding: 'utf8' }).trim();
+const CWD = process.cwd();
+const ownerMatch = REPO_URL.match(/github\.com[\/:]([^\/]+)\//);
+const REPO_OWNER = ownerMatch ? ownerMatch[1] : 'unknown';
+if (REPO_OWNER === 'unknown') {
+  console.error('FAIL: could not parse repo owner from git remote.origin.url:', REPO_URL);
+  process.exit(1);
+}
 
 const child = spawn('npx', ['-y', 'tsx', 'src/index.ts'], {
   stdio: ['pipe', 'pipe', 'pipe'],
@@ -87,6 +95,9 @@ const child = spawn('npx', ['-y', 'tsx', 'src/index.ts'], {
     // Configure two environments, both using SQLite + sqlite-vec, but different db files
     [`${ENV_A}_SQLITE_PATH`]: dbA,
     [`${ENV_B}_SQLITE_PATH`]: dbB,
+    // REQUIRED: workspace allowlists for both environments (same repo owner; isolation is by environment/db)
+    [`${ENV_A}_WORKSPACE_WHITELIST`]: REPO_OWNER,
+    [`${ENV_B}_WORKSPACE_WHITELIST`]: REPO_OWNER,
     // Make env A the default
     CONTEXT_WHISPER_ENV: ENV_A,
   },
@@ -123,6 +134,7 @@ try {
   const upsertMsg = await rpc('tools/call', {
     name: 'upsert_note',
     arguments: {
+      cwd: CWD,
       environment: ENV_A,
       repo_url: REPO_URL,
       topic: 'multi-env-isolation',
@@ -141,6 +153,7 @@ try {
   const topicsAmsg = await rpc('tools/call', {
     name: 'list_topics',
     arguments: {
+      cwd: CWD,
       environment: ENV_A,
       repo_url: REPO_URL,
     },
@@ -154,6 +167,7 @@ try {
   const topicsBmsg = await rpc('tools/call', {
     name: 'list_topics',
     arguments: {
+      cwd: CWD,
       environment: ENV_B,
       repo_url: REPO_URL,
     },
@@ -167,6 +181,7 @@ try {
   const searchAmsg = await rpc('tools/call', {
     name: 'search_notes',
     arguments: {
+      cwd: CWD,
       environment: ENV_A,
       query: `ONLY in ${ENV_A}`,
       repo_url: REPO_URL,
@@ -180,6 +195,7 @@ try {
   const searchBmsg = await rpc('tools/call', {
     name: 'search_notes',
     arguments: {
+      cwd: CWD,
       environment: ENV_B,
       query: `ONLY in ${ENV_A}`,
       repo_url: REPO_URL,

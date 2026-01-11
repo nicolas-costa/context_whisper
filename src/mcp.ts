@@ -5,65 +5,148 @@ import {
   ListPromptsRequestSchema,
   GetPromptRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
+import { execFileSync } from 'child_process';
 import { z } from 'zod';
 import type { DatabaseManager } from './db.js';
 import * as notes from './notes.js';
-import { detectContext, normalizeRepoUrl } from './context-detector.js';
+import { normalizeRepoUrl } from './context-detector.js';
 import { startServer, stopServer } from './web/server.js';
 
-// Helper function to validate required parameters
-function validateRequiredContext(params: {
-  repo_url?: string | null;
-}): { valid: boolean; error?: any; context?: { workspace: string; project: string; repo_url: string } } {
-  if (!params.repo_url) {
+function getGitRemoteOriginUrl(cwd: string): string | null {
+  try {
+    const out = execFileSync('git', ['-C', cwd, 'config', '--get', 'remote.origin.url'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const v = String(out).trim();
+    return v.length > 0 ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function errorResponse(error: string, details?: any) {
+  return {
+    ok: false,
+    error,
+    ...(details ? { details } : {}),
+  };
+}
+
+function resolveRepoContextStrict(params: { repo_url: string; cwd: string }): {
+  workspace: string;
+  project: string;
+  repo_url: string;
+} | { error: any } {
+  const normalizedPayload = normalizeRepoUrl(params.repo_url);
+  if (!normalizedPayload) {
+    return { error: errorResponse('Invalid repo_url format', { provided_repo_url: params.repo_url }) };
+  }
+
+  const remote = getGitRemoteOriginUrl(params.cwd);
+  if (!remote) {
     return {
-      valid: false,
-      error: {
-        ok: false,
-        error: 'Missing required parameter: repo_url',
-        details: {
-          rule: 'repo_url is required for all operations',
-          provided: { repo_url: params.repo_url || null },
-          solution: 'Obtain repo_url using: git config --get remote.origin.url',
-        },
-      },
+      error: errorResponse('Could not resolve git remote from cwd', {
+        cwd: params.cwd,
+        rule: 'cwd must be a git worktree with remote.origin.url configured',
+      }),
     };
   }
 
-  const normalized = normalizeRepoUrl(params.repo_url);
-  if (!normalized) {
+  const normalizedRemote = normalizeRepoUrl(remote);
+  if (!normalizedRemote) {
     return {
-      valid: false,
-      error: {
-        ok: false,
-        error: 'Invalid repo_url format',
-        details: {
-          provided_repo_url: params.repo_url,
-          reason: 'repo_url could not be normalized.',
-          solution: 'Provide a valid git repository URL obtained via: git config --get remote.origin.url',
-        },
-      },
+      error: errorResponse('Invalid git remote URL in cwd', {
+        cwd: params.cwd,
+        remote_origin_url: remote,
+      }),
+    };
+  }
+
+  if (normalizedRemote.url !== normalizedPayload.url) {
+    return {
+      error: errorResponse('repo_url does not match git remote of cwd', {
+        cwd: params.cwd,
+        repo_url: params.repo_url,
+        git_remote_origin_url: remote,
+        normalized_repo_url: normalizedPayload.url,
+        normalized_git_remote_origin_url: normalizedRemote.url,
+      }),
     };
   }
 
   return {
-    valid: true,
-    context: {
-      workspace: normalized.owner,
-      project: normalized.name,
-      repo_url: normalized.url,
-    }
+    workspace: normalizedPayload.owner,
+    project: normalizedPayload.name,
+    repo_url: normalizedPayload.url,
   };
+}
+
+function resolveEnvironmentForWorkspace(
+  dbManager: DatabaseManager,
+  repoWorkspace: string,
+  requestedEnv?: string
+): { envName: string } | { error: any } {
+  const defaultEnv = dbManager.getDefaultEnvironmentName();
+
+  if (requestedEnv) {
+    const cfg = dbManager.getEnvironmentConfig(requestedEnv);
+    if (!cfg) {
+      return { error: errorResponse(`Environment '${requestedEnv}' not configured`) };
+    }
+    if (cfg.allowedWorkspaces && cfg.allowedWorkspaces.length > 0 && !cfg.allowedWorkspaces.includes(repoWorkspace)) {
+      return {
+        error: errorResponse(`Workspace '${repoWorkspace}' is not allowed for environment '${requestedEnv}'`, {
+          environment: requestedEnv,
+          workspace: repoWorkspace,
+          allowed_workspaces: cfg.allowedWorkspaces,
+        }),
+      };
+    }
+    return { envName: requestedEnv };
+  }
+
+  const matches: string[] = [];
+  for (const envName of dbManager.listEnvironments()) {
+    const cfg = dbManager.getEnvironmentConfig(envName);
+    if (!cfg?.allowedWorkspaces || cfg.allowedWorkspaces.length === 0) continue;
+    if (cfg.allowedWorkspaces.includes(repoWorkspace)) matches.push(envName);
+  }
+
+  if (matches.length === 1) return { envName: matches[0] };
+  if (matches.length > 1) {
+    return {
+      error: errorResponse(`Workspace '${repoWorkspace}' matches multiple environments`, {
+        workspace: repoWorkspace,
+        matching_environments: matches,
+      }),
+    };
+  }
+
+  // No explicit routing rule: fall back to default only if it allows (when allowlist is present)
+  const defCfg = dbManager.getEnvironmentConfig(defaultEnv);
+  if (defCfg?.allowedWorkspaces && defCfg.allowedWorkspaces.length > 0 && !defCfg.allowedWorkspaces.includes(repoWorkspace)) {
+    return {
+      error: errorResponse(`Workspace '${repoWorkspace}' is not allowed for default environment '${defaultEnv}'`, {
+        workspace: repoWorkspace,
+        default_environment: defaultEnv,
+        allowed_workspaces: defCfg.allowedWorkspaces,
+      }),
+    };
+  }
+  return { envName: defaultEnv };
 }
 
 // Zod schemas for validation
 const UpsertNoteSchema = z.object({
   environment: z.string().optional(),
+  cwd: z.string().min(1),
   repo_url: z.string(),
-  topic: z.string(),
-  subtopic: z.string().nullable().optional(),
+  topic: z.string().max(500),
+  subtopic: z.string().max(500).nullable().optional(),
   tags: z.array(z.string()).optional(),
-  body_md: z.string(),
+  // Prevent trivial DoS by sending massive payloads.
+  body_md: z.string().max(1_000_000),
   created_by: z.string().nullable().optional(),
   review_status: z.enum(['DRAFT', 'APPROVED']).optional(),
   links: z.array(z.object({
@@ -78,35 +161,34 @@ const UpsertNoteSchema = z.object({
 
 const GetNoteSchema = z.object({
   environment: z.string().optional(),
+  cwd: z.string().min(1),
   repo_url: z.string(),
-  topic: z.string(),
-  subtopic: z.string().nullable().optional(),
+  topic: z.string().max(500),
+  subtopic: z.string().max(500).nullable().optional(),
 });
 
 const SearchNotesSchema = z.object({
   environment: z.string().optional(),
+  cwd: z.string().min(1),
   query: z.string(),
-  /**
-   * Optional repo filter. If provided, search is scoped to that repository (and workspace/project are derived from it).
-   */
-  repo_url: z.string().nullable().optional(),
+  repo_url: z.string(),
   top_k: z.number().int().positive().optional(),
   tags: z.array(z.string()).optional(),
   review_status: z.enum(['DRAFT', 'APPROVED']).nullable().optional(),
-  workspace: z.string().optional(),
-  project: z.string().optional(),
 });
 
 const ListTopicsSchema = z.object({
   environment: z.string().optional(),
+  cwd: z.string().min(1),
   repo_url: z.string(),
 });
 
 const DeleteNoteSchema = z.object({
   environment: z.string().optional(),
+  cwd: z.string().min(1),
   repo_url: z.string(),
-  topic: z.string(),
-  subtopic: z.string().nullable().optional(),
+  topic: z.string().max(500),
+  subtopic: z.string().max(500).nullable().optional(),
 });
 
 const HealthSchema = z.object({
@@ -115,6 +197,7 @@ const HealthSchema = z.object({
 
 const ServeNotesUISchema = z.object({
   environment: z.string().optional(),
+  cwd: z.string().min(1),
 });
 
 const SYSTEM_PROMPT = `REGRAS DE DOCUMENTAÇÃO TÉCNICA:
@@ -172,6 +255,10 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
           inputSchema: {
             type: 'object',
             properties: {
+              cwd: {
+                type: 'string',
+                description: 'REQUIRED. Local working directory of the git repository. Used to verify repo_url via git remote.',
+              },
               environment: {
                 type: 'string',
                 description: envDescription,
@@ -210,7 +297,7 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
                 description: 'Links para código-fonte relacionado',
               },
             },
-            required: ['repo_url', 'topic', 'body_md'],
+            required: ['cwd', 'repo_url', 'topic', 'body_md'],
           },
         },
         {
@@ -219,6 +306,10 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
           inputSchema: {
             type: 'object',
             properties: {
+              cwd: {
+                type: 'string',
+                description: 'REQUIRED. Local working directory of the git repository. Used to verify repo_url via git remote.',
+              },
               environment: {
                 type: 'string',
                 description: envDescription,
@@ -230,15 +321,19 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
               topic: { type: 'string', description: 'Tópico da nota' },
               subtopic: { type: 'string', description: 'Subtópico opcional', nullable: true },
             },
-            required: ['repo_url', 'topic'],
+            required: ['cwd', 'repo_url', 'topic'],
           },
         },
         {
           name: 'search_notes',
-          description: 'Busca notas técnicas usando similaridade semântica vetorial. Busca global se repo_url não for especificado.',
+          description: 'Busca notas técnicas usando similaridade semântica vetorial (escopo: repo_url).',
           inputSchema: {
             type: 'object',
             properties: {
+              cwd: {
+                type: 'string',
+                description: 'REQUIRED. Local working directory of the git repository. Used to verify repo_url via git remote.',
+              },
               environment: {
                 type: 'string',
                 description: envDescription,
@@ -246,8 +341,7 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
               query: { type: 'string', description: 'Query de busca semântica' },
               repo_url: {
                 type: 'string',
-                description: 'OPCIONAL. Filtrar por repositório específico.',
-                nullable: true
+                description: 'REQUIRED. Filtrar por repositório específico (also used for routing/authorization).',
               },
               top_k: { type: 'number', description: 'Número de resultados (padrão: 5)' },
               tags: {
@@ -262,7 +356,7 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
                 nullable: true
               },
             },
-            required: ['query'],
+            required: ['cwd', 'query', 'repo_url'],
           },
         },
         {
@@ -271,6 +365,10 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
           inputSchema: {
             type: 'object',
             properties: {
+              cwd: {
+                type: 'string',
+                description: 'REQUIRED. Local working directory of the git repository. Used to verify repo_url via git remote.',
+              },
               environment: {
                 type: 'string',
                 description: envDescription,
@@ -280,7 +378,7 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
                 description: 'REQUIRED. Full git repository URL para listar tópicos.'
               },
             },
-            required: ['repo_url'],
+            required: ['cwd', 'repo_url'],
           },
         },
         {
@@ -289,6 +387,10 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
           inputSchema: {
             type: 'object',
             properties: {
+              cwd: {
+                type: 'string',
+                description: 'REQUIRED. Local working directory of the git repository. Used to verify repo_url via git remote.',
+              },
               environment: {
                 type: 'string',
                 description: envDescription,
@@ -300,7 +402,7 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
               topic: { type: 'string', description: 'Tópico da nota a ser removida' },
               subtopic: { type: 'string', description: 'Subtópico opcional', nullable: true },
             },
-            required: ['repo_url', 'topic'],
+            required: ['cwd', 'repo_url', 'topic'],
           },
         },
         {
@@ -330,11 +432,16 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
           inputSchema: {
             type: 'object',
             properties: {
+              cwd: {
+                type: 'string',
+                description: 'REQUIRED. Local working directory of the git repository (used for repo path context).',
+              },
               environment: {
                 type: 'string',
                 description: envDescription,
               },
             },
+            required: ['cwd'],
           },
         },
         {
@@ -392,42 +499,36 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
-    const cwd = process.env.CONTEXT_WHISPER_CWD || 
-                process.env.PWD || 
-                process.env.CWD || 
-                process.cwd();
 
     try {
       switch (name) {
         case 'upsert_note': {
           const rawParams = UpsertNoteSchema.parse(args);
-          const adapter = await dbManager.getAdapter(rawParams.environment);
-
-          const validation = validateRequiredContext({
-            repo_url: rawParams.repo_url,
-          });
-
-          if (!validation.valid) {
-            return {
-              content: [{ type: 'text', text: JSON.stringify(validation.error, null, 2) }],
-              isError: true,
-            };
+          const repoContext = resolveRepoContextStrict({ repo_url: rawParams.repo_url, cwd: rawParams.cwd });
+          if ('error' in repoContext) {
+            return { content: [{ type: 'text', text: JSON.stringify(repoContext.error, null, 2) }], isError: true };
           }
+          const envResolved = resolveEnvironmentForWorkspace(dbManager, repoContext.workspace, rawParams.environment);
+          if ('error' in envResolved) {
+            return { content: [{ type: 'text', text: JSON.stringify(envResolved.error, null, 2) }], isError: true };
+          }
+          const adapter = await dbManager.getAdapter(envResolved.envName);
 
           const paramsWithContext = {
             ...rawParams,
-            workspace: validation.context!.workspace,
-            project: validation.context!.project,
+            repo_url: repoContext.repo_url,
+            workspace: repoContext.workspace,
+            project: repoContext.project,
           };
 
-          const result = await notes.upsertNote(adapter, paramsWithContext as notes.UpsertNoteParams, cwd);
+          const result = await notes.upsertNote(adapter, paramsWithContext as notes.UpsertNoteParams, rawParams.cwd);
           
           return {
             content: [{
               type: 'text',
               text: JSON.stringify({
                 ok: true,
-                environment: rawParams.environment || dbManager.getDefaultEnvironmentName(),
+                environment: envResolved.envName,
                 context: result.context,
                 note_id: result.note_id,
               }, null, 2),
@@ -437,26 +538,24 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
 
         case 'get_note': {
           const rawParams = GetNoteSchema.parse(args);
-          const adapter = await dbManager.getAdapter(rawParams.environment);
-
-          const validation = validateRequiredContext({
-            repo_url: rawParams.repo_url,
-          });
-
-          if (!validation.valid) {
-            return {
-              content: [{ type: 'text', text: JSON.stringify(validation.error, null, 2) }],
-              isError: true,
-            };
+          const repoContext = resolveRepoContextStrict({ repo_url: rawParams.repo_url, cwd: rawParams.cwd });
+          if ('error' in repoContext) {
+            return { content: [{ type: 'text', text: JSON.stringify(repoContext.error, null, 2) }], isError: true };
           }
+          const envResolved = resolveEnvironmentForWorkspace(dbManager, repoContext.workspace, rawParams.environment);
+          if ('error' in envResolved) {
+            return { content: [{ type: 'text', text: JSON.stringify(envResolved.error, null, 2) }], isError: true };
+          }
+          const adapter = await dbManager.getAdapter(envResolved.envName);
 
           const paramsWithContext = {
             ...rawParams,
-            workspace: validation.context!.workspace,
-            project: validation.context!.project,
+            repo_url: repoContext.repo_url,
+            workspace: repoContext.workspace,
+            project: repoContext.project,
           };
 
-          const result = await notes.getNote(adapter, paramsWithContext as notes.GetNoteParams, cwd);
+          const result = await notes.getNote(adapter, paramsWithContext as notes.GetNoteParams, rawParams.cwd);
           
           if (!result.note) {
             return {
@@ -465,7 +564,7 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
                 text: JSON.stringify({
                   ok: false,
                   error: 'Note not found',
-                  environment: rawParams.environment || dbManager.getDefaultEnvironmentName(),
+                  environment: envResolved.envName,
                   context: result.context,
                 }, null, 2),
               }],
@@ -484,7 +583,7 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
               type: 'text',
               text: JSON.stringify({
                 ok: true,
-                environment: rawParams.environment || dbManager.getDefaultEnvironmentName(),
+                environment: envResolved.envName,
                 context: result.context,
                 note: noteWithParsedTags,
               }, null, 2),
@@ -494,30 +593,24 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
 
         case 'search_notes': {
           const rawParams = SearchNotesSchema.parse(args);
-          const adapter = await dbManager.getAdapter(rawParams.environment);
-
-          let paramsWithContext = rawParams;
-
-          if (rawParams.repo_url) {
-            const validation = validateRequiredContext({
-              repo_url: rawParams.repo_url,
-            });
-
-            if (!validation.valid) {
-              return {
-                content: [{ type: 'text', text: JSON.stringify(validation.error, null, 2) }],
-                isError: true,
-              };
-            }
-
-            paramsWithContext = {
-              ...rawParams,
-              workspace: validation.context!.workspace,
-              project: validation.context!.project,
-            };
+          const repoContext = resolveRepoContextStrict({ repo_url: rawParams.repo_url, cwd: rawParams.cwd });
+          if ('error' in repoContext) {
+            return { content: [{ type: 'text', text: JSON.stringify(repoContext.error, null, 2) }], isError: true };
           }
+          const envResolved = resolveEnvironmentForWorkspace(dbManager, repoContext.workspace, rawParams.environment);
+          if ('error' in envResolved) {
+            return { content: [{ type: 'text', text: JSON.stringify(envResolved.error, null, 2) }], isError: true };
+          }
+          const adapter = await dbManager.getAdapter(envResolved.envName);
 
-          const result = await notes.searchNotes(adapter, paramsWithContext as notes.SearchNotesParams, cwd);
+          const paramsWithContext = {
+            ...rawParams,
+            repo_url: repoContext.repo_url,
+            workspace: repoContext.workspace,
+            project: repoContext.project,
+          };
+
+          const result = await notes.searchNotes(adapter, paramsWithContext as notes.SearchNotesParams, rawParams.cwd);
           
           const resultsWithParsedTags = result.notes.map((r) => ({
             ...r,
@@ -530,7 +623,7 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
               type: 'text',
               text: JSON.stringify({
                 ok: true,
-                environment: rawParams.environment || dbManager.getDefaultEnvironmentName(),
+                environment: envResolved.envName,
                 context: result.context,
                 notes: resultsWithParsedTags,
               }, null, 2),
@@ -540,33 +633,31 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
 
         case 'list_topics': {
           const rawParams = ListTopicsSchema.parse(args);
-          const adapter = await dbManager.getAdapter(rawParams.environment);
-
-          const validation = validateRequiredContext({
-            repo_url: rawParams.repo_url,
-          });
-
-          if (!validation.valid) {
-            return {
-              content: [{ type: 'text', text: JSON.stringify(validation.error, null, 2) }],
-              isError: true,
-            };
+          const repoContext = resolveRepoContextStrict({ repo_url: rawParams.repo_url, cwd: rawParams.cwd });
+          if ('error' in repoContext) {
+            return { content: [{ type: 'text', text: JSON.stringify(repoContext.error, null, 2) }], isError: true };
           }
+          const envResolved = resolveEnvironmentForWorkspace(dbManager, repoContext.workspace, rawParams.environment);
+          if ('error' in envResolved) {
+            return { content: [{ type: 'text', text: JSON.stringify(envResolved.error, null, 2) }], isError: true };
+          }
+          const adapter = await dbManager.getAdapter(envResolved.envName);
 
           const paramsWithContext = {
             ...rawParams,
-            workspace: validation.context!.workspace,
-            project: validation.context!.project,
+            repo_url: repoContext.repo_url,
+            workspace: repoContext.workspace,
+            project: repoContext.project,
           };
 
-          const result = await notes.listTopics(adapter, paramsWithContext as notes.ListTopicsParams, cwd);
+          const result = await notes.listTopics(adapter, paramsWithContext as notes.ListTopicsParams, rawParams.cwd);
           
           return {
             content: [{
               type: 'text',
               text: JSON.stringify({
                 ok: true,
-                environment: rawParams.environment || dbManager.getDefaultEnvironmentName(),
+                environment: envResolved.envName,
                 context: result.context,
                 topics: result.topics,
               }, null, 2),
@@ -576,35 +667,35 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
 
         case 'delete_note': {
           const rawParams = DeleteNoteSchema.parse(args);
-          const adapter = await dbManager.getAdapter(rawParams.environment);
-
-          const validation = validateRequiredContext({
-            repo_url: rawParams.repo_url,
-          });
-
-          if (!validation.valid) {
-            return {
-              content: [{ type: 'text', text: JSON.stringify(validation.error, null, 2) }],
-              isError: true,
-            };
+          const repoContext = resolveRepoContextStrict({ repo_url: rawParams.repo_url, cwd: rawParams.cwd });
+          if ('error' in repoContext) {
+            return { content: [{ type: 'text', text: JSON.stringify(repoContext.error, null, 2) }], isError: true };
           }
+          const envResolved = resolveEnvironmentForWorkspace(dbManager, repoContext.workspace, rawParams.environment);
+          if ('error' in envResolved) {
+            return { content: [{ type: 'text', text: JSON.stringify(envResolved.error, null, 2) }], isError: true };
+          }
+          const adapter = await dbManager.getAdapter(envResolved.envName);
 
           const paramsWithContext = {
             ...rawParams,
-            workspace: validation.context!.workspace,
-            project: validation.context!.project,
+            repo_url: repoContext.repo_url,
+            workspace: repoContext.workspace,
+            project: repoContext.project,
           };
 
-          const result = await notes.deleteNote(adapter, paramsWithContext as notes.DeleteNoteParams, cwd);
+          const result = await notes.deleteNote(adapter, paramsWithContext as notes.DeleteNoteParams, rawParams.cwd);
           
           return {
             content: [{
               type: 'text',
               text: JSON.stringify({
                 ok: true,
-                environment: rawParams.environment || dbManager.getDefaultEnvironmentName(),
+                environment: envResolved.envName,
                 context: result.context,
                 deleted: result.deleted,
+                ...(result.vector_deleted === undefined ? {} : { vector_deleted: result.vector_deleted }),
+                ...(result.warnings?.length ? { warnings: result.warnings } : {}),
               }, null, 2),
             }],
           };
@@ -676,11 +767,44 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
 
         case 'serve_notes_ui': {
           const rawParams = ServeNotesUISchema.parse(args);
-          const adapter = await dbManager.getAdapter(rawParams.environment);
+          // Environment-scoped UI: infer routing from the repo at cwd (git remote owner -> workspace).
+          const remote = getGitRemoteOriginUrl(rawParams.cwd);
+          if (!remote) {
+            return {
+              content: [{
+                type: 'text',
+                text: JSON.stringify(errorResponse('Could not resolve git remote from cwd', {
+                  cwd: rawParams.cwd,
+                  rule: 'cwd must be a git worktree with remote.origin.url configured',
+                }), null, 2),
+              }],
+              isError: true,
+            };
+          }
+          const normalizedRemote = normalizeRepoUrl(remote);
+          if (!normalizedRemote) {
+            return {
+              content: [{
+                type: 'text',
+                text: JSON.stringify(errorResponse('Invalid git remote URL in cwd', {
+                  cwd: rawParams.cwd,
+                  remote_origin_url: remote,
+                }), null, 2),
+              }],
+              isError: true,
+            };
+          }
+
+          const envResolved = resolveEnvironmentForWorkspace(dbManager, normalizedRemote.owner, rawParams.environment);
+          if ('error' in envResolved) {
+            return { content: [{ type: 'text', text: JSON.stringify(envResolved.error, null, 2) }], isError: true };
+          }
+
+          const adapter = await dbManager.getAdapter(envResolved.envName);
           
           const url = await startServer({
             adapter,
-            cwd
+            cwd: rawParams.cwd
           });
           
           return {
@@ -688,7 +812,7 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
               type: 'text',
               text: JSON.stringify({
                 ok: true,
-                environment: rawParams.environment || dbManager.getDefaultEnvironmentName(),
+                environment: envResolved.envName,
                 url,
                 message: 'Web UI server started. Navigate to the URL to view notes.',
                 auto_shutdown: 'Server will shutdown after 10 minutes of inactivity.'

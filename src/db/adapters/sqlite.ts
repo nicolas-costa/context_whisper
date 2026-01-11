@@ -20,6 +20,11 @@ import type {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+function escapeLike(input: string): string {
+  // Escape LIKE wildcards and escape char for SQLite patterns.
+  return input.replace(/[\\%_]/g, '\\$&');
+}
+
 /**
  * SQLite Relational Adapter
  */
@@ -405,13 +410,12 @@ export class SQLiteVectorAdapter implements VectorAdapter {
       throw new Error(`Failed to ensure integer type: ${intNoteId} -> ${finalNoteId}`);
     }
     
-    // Convert buffer to hex blob literal for SQL
-    const hexBlob = buffer.toString('hex');
-    
-    // Use db.exec with raw SQL containing integer literal and hex blob
-    const insertSql = `INSERT INTO note_vectors(note_id, embedding) VALUES (${finalNoteId}, x'${hexBlob}')`;
-    
-    this.db.exec(insertSql);
+    // Bind Buffer directly (avoid raw SQL interpolation).
+    // vec0 is strict about the PK type; enforce INTEGER via CAST.
+    const insertStmt = this.db.prepare(
+      'INSERT INTO note_vectors(note_id, embedding) VALUES (CAST(? AS INTEGER), ?)'
+    );
+    insertStmt.run(finalNoteId, buffer);
   }
 
   async deleteVector(noteId: number): Promise<void> {
@@ -434,7 +438,9 @@ export class SQLiteVectorAdapter implements VectorAdapter {
     `;
 
     const stmt = this.db.prepare(query);
-    const results = stmt.all(buffer, topK) as Array<{ note_id: number; distance: number }>;
+    // Request more results to account for post-filtering
+    const fetchLimit = filter?.noteIds ? Math.min(topK * 3, 100) : topK;
+    const results = stmt.all(buffer, fetchLimit) as Array<{ note_id: number; distance: number }>;
 
     // Apply noteIds filter if provided (for post-filtering after relational query)
     let filteredResults = results;
@@ -522,8 +528,9 @@ export class SQLiteDatabaseAdapter implements DatabaseAdapter {
     if (options.tags && options.tags.length > 0) {
       const tagConditions: string[] = [];
       options.tags.forEach((tag) => {
-        tagConditions.push(`json_extract(n.tags_json, '$') LIKE ?`);
-        params.push(`%"${tag}"%`);
+        const escaped = escapeLike(tag);
+        tagConditions.push(`json_extract(n.tags_json, '$') LIKE ? ESCAPE '\\'`);
+        params.push(`%"${escaped}"%`);
       });
       noteConditions.push(`(${tagConditions.join(' OR ')})`);
     }

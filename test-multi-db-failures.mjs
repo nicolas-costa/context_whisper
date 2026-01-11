@@ -1,6 +1,7 @@
 import { spawn } from 'child_process';
 import assert from 'assert';
 import process from 'process';
+import { execSync } from 'child_process';
 
 /**
  * Smoke tests for multi-db config error paths.
@@ -46,11 +47,17 @@ function assertIncludes(haystack, needle, label) {
 }
 
 async function main() {
+  const repoUrl = execSync('git config --get remote.origin.url', { cwd: process.cwd(), encoding: 'utf8' }).trim();
+  const ownerMatch = repoUrl.match(/github\.com[\/:]([^\/]+)\//);
+  const REPO_OWNER = ownerMatch ? ownerMatch[1] : 'unknown';
+  assert(REPO_OWNER !== 'unknown', `Could not parse repo owner from git remote: ${repoUrl}`);
+
   // 1) CLI --env must error when env is not configured
   {
     const r = await runServerOnce({
       env: {
         LOCAL_SQLITE_PATH: '/tmp/context-whisper-local.sqlite',
+        LOCAL_WORKSPACE_WHITELIST: REPO_OWNER,
         CONTEXT_WHISPER_ENV: 'LOCAL',
       },
       args: ['--env', 'DOES_NOT_EXIST'],
@@ -69,6 +76,7 @@ async function main() {
         MYSQL_ONLY_MYSQL_USER: 'u',
         MYSQL_ONLY_MYSQL_PASSWORD: 'p',
         MYSQL_ONLY_MYSQL_DATABASE: 'db',
+        MYSQL_ONLY_WORKSPACE_WHITELIST: REPO_OWNER,
         CONTEXT_WHISPER_ENV: 'MYSQL_ONLY',
       },
     });
@@ -86,6 +94,7 @@ async function main() {
         PG_BAD_PG_USER: 'u',
         PG_BAD_PG_PASSWORD: 'p',
         PG_BAD_PG_DATABASE: 'db',
+        PG_BAD_WORKSPACE_WHITELIST: REPO_OWNER,
         CONTEXT_WHISPER_ENV: 'PG_BAD',
       },
     });
@@ -107,6 +116,7 @@ async function main() {
         CORP_PG_PASSWORD: 'p',
         CORP_PG_DATABASE: 'db',
         CORP_VECTOR_STORE: 'qdrant',
+        CORP_WORKSPACE_WHITELIST: REPO_OWNER,
         CONTEXT_WHISPER_ENV: 'CORP',
       },
     });

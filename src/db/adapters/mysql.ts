@@ -8,6 +8,7 @@ import mysql from 'mysql2/promise';
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { redactSecrets, truncate } from '../../security.js';
 import type {
   RelationalAdapter,
   Note,
@@ -17,6 +18,12 @@ import type {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+function escapeLike(input: string): string {
+  // Escape LIKE wildcards and escape char for MySQL patterns.
+  // We will pair this with: LIKE ... ESCAPE '\\'
+  return input.replace(/[\\%_]/g, '\\$&');
+}
 
 /**
  * MySQL Relational Adapter
@@ -127,12 +134,23 @@ export class MySQLRelationalAdapter implements RelationalAdapter {
       params.repoName || null,
     ]) as any;
 
-    // If it was an update (affected rows = 2 in MySQL ON DUPLICATE KEY UPDATE)
+    // Detect insert vs update reliably.
+    // MySQL typically returns affectedRows = 1 for insert and 2 for update in ON DUPLICATE KEY UPDATE.
+    if (typeof result.affectedRows === 'number') {
+      if (result.affectedRows === 2) {
+        const note = await this.getNote(params.workspace, params.project, params.topic, params.subtopic);
+        return note?.note_id ?? 0;
+      }
+      if (result.affectedRows === 1) {
+        return result.insertId;
+      }
+    }
+
+    // Fallback for compatibility: keep old behavior when affectedRows isn't present.
     if (result.insertId === 0) {
       const note = await this.getNote(params.workspace, params.project, params.topic, params.subtopic);
       return note?.note_id ?? 0;
     }
-
     return result.insertId;
   }
 
@@ -364,8 +382,9 @@ export class MySQLRelationalAdapter implements RelationalAdapter {
     if (options.tags && options.tags.length > 0) {
       const tagConditions: string[] = [];
       options.tags.forEach((tag) => {
-        tagConditions.push('tags_json LIKE ?');
-        params.push(`%"${tag}"%`);
+        const escaped = escapeLike(tag);
+        tagConditions.push("tags_json LIKE ? ESCAPE '\\\\'");
+        params.push(`%"${escaped}"%`);
       });
       conditions.push(`(${tagConditions.join(' OR ')})`);
     }
@@ -397,7 +416,9 @@ export async function createMySQLPool(
     user: config.user,
     password: config.password,
     database: config.database,
-    ssl: config.ssl ? {} : undefined,
+    ssl: config.ssl
+      ? { rejectUnauthorized: config.sslRejectUnauthorized ?? true }
+      : undefined,
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0,
@@ -408,7 +429,8 @@ export async function createMySQLPool(
     await pool.query('SELECT 1');
   } catch (error) {
     await pool.end();
-    throw new Error(`Failed to connect to MySQL: ${error instanceof Error ? error.message : error}`);
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to connect to MySQL: ${truncate(redactSecrets(msg), 500)}`);
   }
 
   return pool;

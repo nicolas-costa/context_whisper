@@ -56,44 +56,56 @@ export async function createDatabaseAdapter(
   if (vector.type === 'qdrant') {
     const qdrantConfig = vector.config as QdrantConfig;
     
-    let relationalAdapter: SQLiteRelationalAdapter | PostgresRelationalAdapter | MySQLRelationalAdapter;
+    let relationalAdapter: SQLiteRelationalAdapter | PostgresRelationalAdapter | MySQLRelationalAdapter | undefined;
 
-    switch (relational.type) {
-      case 'sqlite': {
-        const sqliteConfig = relational as SQLiteConfig;
-        const { adapter: sqliteAdapter } = openSQLiteDatabase(sqliteConfig, name);
-        relationalAdapter = sqliteAdapter.relational;
-        break;
+    try {
+      switch (relational.type) {
+        case 'sqlite': {
+          const sqliteConfig = relational as SQLiteConfig;
+          const { adapter: sqliteAdapter } = openSQLiteDatabase(sqliteConfig, name);
+          relationalAdapter = sqliteAdapter.relational;
+          break;
+        }
+        case 'postgres': {
+          const pgConfig = relational as PostgresConfig;
+          const pgAdapter = await createPostgresAdapter(pgConfig, name);
+          relationalAdapter = pgAdapter.relational;
+          break;
+        }
+        case 'mysql': {
+          const mysqlConfig = relational as MySQLConfig;
+          relationalAdapter = await createMySQLAdapter(mysqlConfig);
+          break;
+        }
+        default:
+          throw new Error(`Unsupported relational database type: ${(relational as any).type}`);
       }
-      case 'postgres': {
-        const pgConfig = relational as PostgresConfig;
-        const pgAdapter = await createPostgresAdapter(pgConfig, name);
-        relationalAdapter = pgAdapter.relational;
-        break;
+
+      // Initialize relational schema
+      await relationalAdapter.initSchema();
+
+      // Create combined adapter with Qdrant
+      const combinedAdapter = createQdrantCombinedAdapter(
+        relationalAdapter,
+        qdrantConfig,
+        name
+      );
+
+      // Initialize Qdrant schema
+      await combinedAdapter.vector.initSchema();
+
+      return combinedAdapter;
+    } catch (err) {
+      // Avoid leaking pools/DB handles when combined adapter creation fails.
+      if (relationalAdapter) {
+        try {
+          await relationalAdapter.close();
+        } catch {
+          // Best-effort cleanup only.
+        }
       }
-      case 'mysql': {
-        const mysqlConfig = relational as MySQLConfig;
-        relationalAdapter = await createMySQLAdapter(mysqlConfig);
-        break;
-      }
-      default:
-        throw new Error(`Unsupported relational database type: ${(relational as any).type}`);
+      throw err;
     }
-
-    // Initialize relational schema
-    await relationalAdapter.initSchema();
-
-    // Create combined adapter with Qdrant
-    const combinedAdapter = createQdrantCombinedAdapter(
-      relationalAdapter,
-      qdrantConfig,
-      name
-    );
-
-    // Initialize Qdrant schema
-    await combinedAdapter.vector.initSchema();
-
-    return combinedAdapter;
   }
 
   throw new Error(
@@ -115,9 +127,10 @@ export function parseEnvironmentPrefix(key: string): string | null {
   // Known suffixes that indicate a database config
   const suffixes = [
     '_SQLITE_PATH',
-    '_PG_HOST', '_PG_PORT', '_PG_USER', '_PG_PASSWORD', '_PG_DATABASE', '_PG_SSL',
-    '_MYSQL_HOST', '_MYSQL_PORT', '_MYSQL_USER', '_MYSQL_PASSWORD', '_MYSQL_DATABASE', '_MYSQL_SSL',
-    '_QDRANT_HOST', '_QDRANT_PORT', '_QDRANT_API_KEY', '_QDRANT_COLLECTION', '_QDRANT_HTTPS',
+    '_PG_HOST', '_PG_PORT', '_PG_USER', '_PG_PASSWORD', '_PG_DATABASE', '_PG_SSL', '_PG_SSL_REJECT_UNAUTHORIZED',
+    '_MYSQL_HOST', '_MYSQL_PORT', '_MYSQL_USER', '_MYSQL_PASSWORD', '_MYSQL_DATABASE', '_MYSQL_SSL', '_MYSQL_SSL_REJECT_UNAUTHORIZED',
+    '_QDRANT_HOST', '_QDRANT_PORT', '_QDRANT_API_KEY', '_QDRANT_COLLECTION', '_QDRANT_HTTPS', '_QDRANT_TIMEOUT_MS',
+    '_WORKSPACE_WHITELIST',
     '_VECTOR_STORE',
   ];
   
@@ -165,6 +178,16 @@ export function parseEnvironmentConfig(
   defaults: { dbPath: string; vecLibPath?: string }
 ): EnvironmentConfig | null {
   const prefix = `${envName}_`;
+
+  // REQUIRED workspace allowlist for routing/authorization decisions.
+  // Comma-separated repo owners (e.g., "nicolas-costa,consultoria-a,cliente-b")
+  const workspaceWhitelistRaw = envVars[`${prefix}WORKSPACE_WHITELIST`];
+  const allowedWorkspaces = workspaceWhitelistRaw
+    ? workspaceWhitelistRaw
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean)
+    : undefined;
   
   // Check for SQLite config
   const sqlitePath = envVars[`${prefix}SQLITE_PATH`];
@@ -191,6 +214,7 @@ export function parseEnvironmentConfig(
   const qdrantApiKey = envVars[`${prefix}QDRANT_API_KEY`];
   const qdrantCollection = envVars[`${prefix}QDRANT_COLLECTION`];
   const qdrantHttps = envVars[`${prefix}QDRANT_HTTPS`];
+  const qdrantTimeoutMs = envVars[`${prefix}QDRANT_TIMEOUT_MS`];
   const hasQdrantConfig = qdrantHost;
 
   // Explicit vector store selection
@@ -208,6 +232,9 @@ export function parseEnvironmentConfig(
       password: pgPassword || '',
       database: pgDatabase!,
       ssl: envVars[`${prefix}PG_SSL`] === 'true',
+      sslRejectUnauthorized: envVars[`${prefix}PG_SSL_REJECT_UNAUTHORIZED`]
+        ? envVars[`${prefix}PG_SSL_REJECT_UNAUTHORIZED`] === 'true'
+        : undefined,
     };
   } else if (hasMysqlConfig) {
     relationalConfig = {
@@ -218,6 +245,9 @@ export function parseEnvironmentConfig(
       password: mysqlPassword || '',
       database: mysqlDatabase!,
       ssl: envVars[`${prefix}MYSQL_SSL`] === 'true',
+      sslRejectUnauthorized: envVars[`${prefix}MYSQL_SSL_REJECT_UNAUTHORIZED`]
+        ? envVars[`${prefix}MYSQL_SSL_REJECT_UNAUTHORIZED`] === 'true'
+        : undefined,
     };
   } else if (sqlitePath) {
     relationalConfig = {
@@ -228,6 +258,11 @@ export function parseEnvironmentConfig(
   } else {
     // No explicit config for this environment
     return null;
+  }
+
+  // Enforce whitelist for any configured environment (prevents implicit “catch-all” routing).
+  if (!allowedWorkspaces || allowedWorkspaces.length === 0) {
+    throw new Error(`${envName}: WORKSPACE_WHITELIST is required (e.g., ${envName}_WORKSPACE_WHITELIST="consultoria-a,cliente-b")`);
   }
 
   // Determine vector store
@@ -245,7 +280,11 @@ export function parseEnvironmentConfig(
         port: parseInt(qdrantPort || '6333', 10),
         apiKey: qdrantApiKey,
         collection: qdrantCollection,
-        https: qdrantHttps === 'true',
+        // Secure default: if an API key is set and QDRANT_HTTPS isn't explicitly provided, assume HTTPS.
+        https: qdrantHttps
+          ? qdrantHttps === 'true'
+          : (qdrantApiKey ? true : false),
+        timeoutMs: qdrantTimeoutMs ? parseInt(qdrantTimeoutMs, 10) : undefined,
       },
     };
   } else if (vectorStore === 'pgvector' || (relationalConfig.type === 'postgres' && !vectorStore)) {
@@ -270,6 +309,7 @@ export function parseEnvironmentConfig(
 
   return {
     name: envName,
+    allowedWorkspaces,
     relational: relationalConfig,
     vector: vectorConfig,
   };
@@ -301,7 +341,8 @@ export function parseAllEnvironmentConfigs(
  */
 export function createDefaultSQLiteConfig(
   dbPath: string,
-  vecLibPath?: string
+  vecLibPath: string | undefined,
+  allowedWorkspaces: string[]
 ): EnvironmentConfig {
   const sqliteConfig: SQLiteConfig = {
     type: 'sqlite',
@@ -311,6 +352,7 @@ export function createDefaultSQLiteConfig(
 
   return {
     name: 'default',
+    allowedWorkspaces,
     relational: sqliteConfig,
     vector: {
       type: 'sqlite-vec',

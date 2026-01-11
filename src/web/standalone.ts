@@ -37,6 +37,23 @@ if (envConfig) {
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
+const corsAllowList = (process.env.CONTEXT_WHISPER_UI_CORS_ORIGINS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
+function applyCors(req: http.IncomingMessage, res: http.ServerResponse) {
+  const origin = req.headers.origin;
+  if (!origin) return;
+  if (corsAllowList.length === 0) return; // default: no CORS
+  if (!corsAllowList.includes(origin)) return;
+
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+}
+
 // Mime types
 const MIMES: Record<string, string> = {
   '.html': 'text/html',
@@ -49,13 +66,17 @@ const MIMES: Record<string, string> = {
 };
 
 const server = http.createServer(async (req, res) => {
-  // CORS
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  // CORS: default deny (same-origin works without CORS headers).
+  applyCors(req, res);
 
   if (req.method === 'OPTIONS') {
-    res.writeHead(204);
+    // Only allow preflight for explicitly allowed origins.
+    const origin = req.headers.origin;
+    if (origin && corsAllowList.length > 0 && corsAllowList.includes(origin)) {
+      res.writeHead(204);
+    } else {
+      res.writeHead(403);
+    }
     res.end();
     return;
   }

@@ -11,6 +11,7 @@ import type {
   SearchResult,
   QdrantConfig,
 } from './interface.js';
+import { redactSecrets, truncate } from '../../security.js';
 
 const DEFAULT_COLLECTION_NAME = 'context_whisper_notes';
 const VECTOR_DIMENSION = 384; // MiniLM-L6-v2 output dimension
@@ -35,12 +36,22 @@ export class QdrantVectorAdapter implements VectorAdapter {
   private baseUrl: string;
   private apiKey?: string;
   private collectionName: string;
+  private timeoutMs: number;
 
   constructor(config: QdrantConfig) {
     const protocol = config.https ? 'https' : 'http';
     this.baseUrl = `${protocol}://${config.host}:${config.port}`;
     this.apiKey = config.apiKey;
     this.collectionName = config.collection || DEFAULT_COLLECTION_NAME;
+    this.timeoutMs = typeof config.timeoutMs === 'number' && config.timeoutMs > 0 ? config.timeoutMs : 30_000;
+
+    if (this.apiKey && !config.https) {
+      // This is not just "less secure" — it's transmitting secrets in cleartext on the network.
+      console.error(
+        `[context-whisper] SECURITY WARNING: Qdrant is configured with an API key over HTTP (https=false). ` +
+        `This exposes the API key to interception. Set {ENV}_QDRANT_HTTPS=true.`
+      );
+    }
   }
 
   private async request(
@@ -56,15 +67,32 @@ export class QdrantVectorAdapter implements VectorAdapter {
       headers['api-key'] = this.apiKey;
     }
 
-    const response = await fetch(`${this.baseUrl}${path}`, {
-      method,
-      headers,
-      body: body ? JSON.stringify(body) : undefined,
-    });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs);
+
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}${path}`, {
+        method,
+        headers,
+        body: body ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+      });
+    } catch (err: any) {
+      const name = err?.name ? String(err.name) : '';
+      if (name === 'AbortError') {
+        throw new Error(`Qdrant request timed out after ${this.timeoutMs}ms`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`Qdrant API error (${response.status}): ${errorText}`);
+      throw new Error(
+        `Qdrant API error (${response.status}): ${truncate(redactSecrets(errorText), 2000)}`
+      );
     }
 
     const contentType = response.headers.get('content-type');
@@ -85,31 +113,34 @@ export class QdrantVectorAdapter implements VectorAdapter {
   }
 
   async initSchema(): Promise<void> {
-    // Check if collection exists
+    // Create collection idempotently (avoid TOCTOU races).
     try {
-      await this.request('GET', `/collections/${this.collectionName}`);
-      // Collection exists, nothing to do
-      return;
+      await this.request('PUT', `/collections/${this.collectionName}`, {
+        vectors: {
+          size: VECTOR_DIMENSION,
+          distance: 'Cosine',
+        },
+      });
     } catch (error: any) {
-      // Collection doesn't exist, create it
-      if (!error.message?.includes('404') && !error.message?.includes('Not found')) {
+      const msg = error?.message ? String(error.message) : String(error);
+      // 409 / "already exists" should be ignored for concurrent starts.
+      if (!msg.includes('409') && !msg.toLowerCase().includes('already exists') && !msg.toLowerCase().includes('conflict')) {
         throw error;
       }
     }
 
-    // Create collection with cosine distance (matches MiniLM-L6-v2 embeddings)
-    await this.request('PUT', `/collections/${this.collectionName}`, {
-      vectors: {
-        size: VECTOR_DIMENSION,
-        distance: 'Cosine',
-      },
-    });
-
-    // Create payload index for note_id (for efficient filtering)
-    await this.request('PUT', `/collections/${this.collectionName}/index`, {
-      field_name: 'note_id',
-      field_schema: 'integer',
-    });
+    // Create payload index for note_id (idempotent).
+    try {
+      await this.request('PUT', `/collections/${this.collectionName}/index`, {
+        field_name: 'note_id',
+        field_schema: 'integer',
+      });
+    } catch (error: any) {
+      const msg = error?.message ? String(error.message) : String(error);
+      if (!msg.includes('409') && !msg.toLowerCase().includes('already exists') && !msg.toLowerCase().includes('conflict')) {
+        throw error;
+      }
+    }
   }
 
   async close(): Promise<void> {

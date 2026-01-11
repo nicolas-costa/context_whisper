@@ -14,6 +14,7 @@ export class DatabaseManager {
   private configs: Map<string, EnvironmentConfig>;
   private defaultEnvironment: string;
   private initPromises: Map<string, Promise<DatabaseAdapter>> = new Map();
+  private allowedEnvironments: Set<string> | null;
 
   constructor(
     configs: Map<string, EnvironmentConfig>,
@@ -21,13 +22,43 @@ export class DatabaseManager {
   ) {
     this.configs = configs;
     this.defaultEnvironment = defaultEnvironment;
+
+    // Security controls (opt-in via env vars).
+    //
+    // IMPORTANT: in this project, "environment" is a *connection profile* (which DB/credentials to use),
+    // while workspace/owner comes from repo_url (validated against git remote of `cwd`) and is constrained
+    // by per-environment WORKSPACE_WHITELIST.
+    //
+    // These flags are an extra coarse-grained guardrail on top of workspace whitelisting:
+    // they reduce blast radius when running multiple environments side-by-side.
+    //
+    // - CONTEXT_WHISPER_ALLOWED_ENVIRONMENTS="ACME_CORP,COMPANY_B"
+    //   Allow only these environments to be selected (allowlist).
+    const allowListRaw = process.env.CONTEXT_WHISPER_ALLOWED_ENVIRONMENTS;
+    if (allowListRaw && allowListRaw.trim().length > 0) {
+      const items = allowListRaw
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean);
+      this.allowedEnvironments = new Set(items);
+    } else {
+      this.allowedEnvironments = null;
+    }
   }
 
   /**
    * Get adapter for a specific environment (lazy initialization)
    */
   async getAdapter(environmentName?: string): Promise<DatabaseAdapter> {
-    const envName = environmentName || this.defaultEnvironment;
+    const requested = environmentName || this.defaultEnvironment;
+    const envName = requested;
+
+    if (this.allowedEnvironments && !this.allowedEnvironments.has(envName)) {
+      throw new Error(
+        `Environment '${envName}' is not allowed by allowlist. ` +
+        `Set CONTEXT_WHISPER_ALLOWED_ENVIRONMENTS to include it, or unset the allowlist.`
+      );
+    }
 
     // Return cached adapter if exists
     if (this.adapters.has(envName)) {

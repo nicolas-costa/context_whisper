@@ -69,6 +69,8 @@ export interface DeleteNoteParams {
 export interface DeleteNoteResult {
   deleted: boolean;
   context: DetectedContext;
+  vector_deleted?: boolean;
+  warnings?: string[];
 }
 
 export interface UpdateNoteMetaParams {
@@ -306,12 +308,82 @@ export async function deleteNote(
     cwd
   );
 
-  const deleted = await adapter.relational.deleteNote(
+  // Fetch note first so we can delete vectors even when vectors live outside the relational DB (e.g., Qdrant).
+  const existing = await adapter.relational.getNote(
     context.workspace,
     context.project,
     params.topic,
     params.subtopic
   );
+
+  if (!existing) {
+    return { deleted: false, context };
+  }
+
+  const warnings: string[] = [];
+
+  const isPermissionDenied = (err: any): boolean => {
+    const code = err?.code ? String(err.code) : '';
+    const msg = err?.message ? String(err.message) : String(err);
+
+    // Postgres: insufficient_privilege = 42501
+    if (code === '42501') return true;
+
+    // MySQL common permission errors (best-effort)
+    if (code.includes('ACCESS_DENIED') || code.includes('ER_TABLEACCESS_DENIED') || code.includes('ER_DBACCESS_DENIED')) {
+      return true;
+    }
+
+    // Generic messages
+    if (/permission denied/i.test(msg) || /not authorized/i.test(msg) || /insufficient privilege/i.test(msg)) {
+      return true;
+    }
+    // Qdrant may encode status in message
+    if (msg.includes('Qdrant API error (401)') || msg.includes('Qdrant API error (403)')) {
+      return true;
+    }
+
+    return false;
+  };
+
+  // Step 1: delete the relational note (authoritative source of truth)
+  let deleted: boolean;
+  try {
+    deleted = await adapter.relational.deleteNote(
+      context.workspace,
+      context.project,
+      params.topic,
+      params.subtopic
+    );
+  } catch (err: any) {
+    if (isPermissionDenied(err)) {
+      throw new Error(
+        `Delete not permitted by relational database credentials for environment '${adapter.environmentName}'.`
+      );
+    }
+    throw err;
+  }
+
+  if (!deleted) {
+    return { deleted: false, context };
+  }
+
+  // Step 2: best-effort delete vector (required for external stores like Qdrant)
+  try {
+    await adapter.vector.deleteVector(existing.note_id);
+    return { deleted: true, context, vector_deleted: true };
+  } catch (err: any) {
+    if (isPermissionDenied(err)) {
+      warnings.push(
+        `Vector delete not permitted by vector store credentials for environment '${adapter.environmentName}'. ` +
+          `The note was deleted from the relational database but the vector may remain orphaned.`
+      );
+      return { deleted: true, context, vector_deleted: false, warnings };
+    }
+    // Non-permission error: surface but keep deletion result (note already deleted).
+    warnings.push(`Vector delete failed after relational delete: ${err?.message ? String(err.message) : String(err)}`);
+    return { deleted: true, context, vector_deleted: false, warnings };
+  }
 
   return {
     deleted,
