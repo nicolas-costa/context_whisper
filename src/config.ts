@@ -25,7 +25,7 @@ export interface Config {
  */
 function getDefaultDbPath(): string {
   const home = homedir();
-  
+
   if (platform() === 'darwin') {
     return join(home, 'Library', 'Application Support', 'context-whisper', 'meta.sqlite');
   } else if (platform() === 'win32') {
@@ -67,19 +67,19 @@ function findVecLib(): string | undefined {
     // 2. Directory where the module is located (when run via tsx/npx)
     const cwd = processCwd();
     let searchDirs: string[] = [cwd];
-    
+
     try {
       // If running from a compiled module, use __dirname equivalent
       const currentFileUrl = import.meta.url;
       const currentFilePath = fileURLToPath(currentFileUrl);
       const moduleDir = dirname(currentFilePath);
-      
+
       // Go up to find package root (look for package.json or node_modules)
       let checkDir = moduleDir;
       for (let i = 0; i < 10; i++) {
         const hasPackageJson = existsSync(join(checkDir, 'package.json'));
         const hasNodeModules = existsSync(join(checkDir, 'node_modules'));
-        
+
         if (hasPackageJson || hasNodeModules) {
           // Make sure it's not already in searchDirs
           if (checkDir !== cwd) {
@@ -95,30 +95,30 @@ function findVecLib(): string | undefined {
       // If import.meta.url is not available, just use cwd
       // This can happen in some environments
     }
-    
+
     // Look for platform-specific binaries
     const platformMap: Record<string, string> = {
-      'linux': 'linux',
-      'darwin': 'darwin',
-      'win32': 'windows',
+      linux: 'linux',
+      darwin: 'darwin',
+      win32: 'windows',
     };
     const archMap: Record<string, string> = {
-      'x64': 'x64',
-      'arm64': 'arm64',
+      x64: 'x64',
+      arm64: 'arm64',
     };
-    
+
     const platformName = platformMap[platform()] || 'linux';
     const archName = archMap[process.arch] || 'x64';
     const packageName = `sqlite-vec-${platformName}-${archName}`;
-    
+
     // Determine extension file name based on platform
     const extensionFiles: Record<string, string> = {
-      'linux': 'vec0.so',
-      'darwin': 'vec0.dylib',
-      'windows': 'vec0.dll',
+      linux: 'vec0.so',
+      darwin: 'vec0.dylib',
+      windows: 'vec0.dll',
     };
     const extName = extensionFiles[platformName] || 'vec0.so';
-    
+
     // Search in each potential directory
     for (const searchDir of searchDirs) {
       const possiblePaths = [
@@ -127,7 +127,7 @@ function findVecLib(): string | undefined {
         join(searchDir, 'node_modules', 'sqlite-vec', 'lib', extName),
         join(searchDir, 'node_modules', 'sqlite-vec', extName),
       ];
-      
+
       for (const path of possiblePaths) {
         if (existsSync(path)) {
           return path;
@@ -142,12 +142,12 @@ function findVecLib(): string | undefined {
   try {
     const platformName = platform();
     const extensionFiles: Record<string, string> = {
-      'linux': 'vec0.so',
-      'darwin': 'vec0.dylib',
-      'win32': 'vec0.dll',
+      linux: 'vec0.so',
+      darwin: 'vec0.dylib',
+      win32: 'vec0.dll',
     };
     const extName = extensionFiles[platformName] || 'vec0.so';
-    
+
     for (const basePath of COMMON_VEC_PATHS) {
       try {
         const vecPath = join(dirname(basePath), extName);
@@ -165,30 +165,27 @@ function findVecLib(): string | undefined {
   } catch {
     // Continue
   }
-  
+
   return undefined;
 }
 
 /**
  * Resolve configuration from CLI args, ENV vars, and defaults
  * Precedence: CLI > ENV > default
- * 
+ *
  * Environment variables for multi-database support:
  * - {ENV}_SQLITE_PATH - SQLite database path
  * - {ENV}_PG_HOST, {ENV}_PG_PORT, {ENV}_PG_USER, {ENV}_PG_PASSWORD, {ENV}_PG_DATABASE, {ENV}_PG_SSL
  * - {ENV}_MYSQL_HOST, {ENV}_MYSQL_PORT, {ENV}_MYSQL_USER, {ENV}_MYSQL_PASSWORD, {ENV}_MYSQL_DATABASE, {ENV}_MYSQL_SSL
  * - {ENV}_QDRANT_HOST, {ENV}_QDRANT_PORT, {ENV}_QDRANT_API_KEY, {ENV}_QDRANT_COLLECTION, {ENV}_QDRANT_HTTPS
  * - {ENV}_VECTOR_STORE - "sqlite-vec" | "pgvector" | "qdrant"
- * 
+ *
  * Examples:
  * - PROD_PG_HOST=prod.db.com + PROD_PG_USER=... -> PostgreSQL + pgvector for PROD
  * - DEV_MYSQL_HOST=dev.db.com + DEV_QDRANT_HOST=qdrant.dev.com -> MySQL + Qdrant for DEV
  * - (no prefix) -> Default SQLite + sqlite-vec (backward compatible)
  */
-export function resolveConfig(
-  dbPath?: string,
-  vecLibPath?: string
-): Config {
+export function resolveConfig(dbPath?: string, vecLibPath?: string): Config {
   // Base config (backward compatible defaults)
   const baseDbPath = dbPath || env.CONTEXT_WHISPER_DB_PATH || getDefaultDbPath();
   const baseVecLibPath = vecLibPath || findVecLib();
@@ -201,18 +198,24 @@ export function resolveConfig(
 
   // Parse multi-environment configurations from env vars
   const defaults = { dbPath: baseDbPath, vecLibPath: baseVecLibPath };
-  const environmentConfigs = parseAllEnvironmentConfigs(env as Record<string, string | undefined>, defaults);
+  const environmentConfigs = parseAllEnvironmentConfigs(
+    env as Record<string, string | undefined>,
+    defaults
+  );
 
   // If no environments configured, use default SQLite
   if (environmentConfigs.size === 0) {
     const raw = env.DEFAULT_WORKSPACE_WHITELIST;
     const allowedWorkspaces = raw
-      ? raw.split(',').map(s => s.trim()).filter(Boolean)
+      ? raw
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
       : [];
     if (allowedWorkspaces.length === 0) {
       throw new Error(
         `DEFAULT_WORKSPACE_WHITELIST is required when using the implicit 'default' environment ` +
-        `(e.g., DEFAULT_WORKSPACE_WHITELIST=\"nicolas-costa\").`
+          `(e.g., DEFAULT_WORKSPACE_WHITELIST=\"nicolas-costa\").`
       );
     }
     const defaultConfig = createDefaultSQLiteConfig(baseDbPath, baseVecLibPath, allowedWorkspaces);
@@ -237,10 +240,7 @@ export function resolveConfig(
 /**
  * Get environment configuration by name
  */
-export function getEnvironmentConfig(
-  config: Config,
-  envName?: string
-): EnvironmentConfig | null {
+export function getEnvironmentConfig(config: Config, envName?: string): EnvironmentConfig | null {
   const name = envName || config.defaultEnvironment;
   return config.environments.get(name) || null;
 }
@@ -265,12 +265,12 @@ export function hasEnvironment(config: Config, envName: string): boolean {
 export function getDbTypeDescription(envConfig: EnvironmentConfig): string {
   const relType = envConfig.relational.type;
   const vecType = envConfig.vector.type;
-  
+
   if (relType === vecType.replace('-vec', '').replace('pg', 'postgres')) {
     // All-in-one (SQLite + sqlite-vec or PostgreSQL + pgvector)
     return `${relType.toUpperCase()} + ${vecType}`;
   }
-  
+
   // Split storage
   return `${relType.toUpperCase()} (relational) + ${vecType} (vectors)`;
 }

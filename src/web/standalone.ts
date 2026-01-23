@@ -31,7 +31,10 @@ if (envConfig) {
 } else {
   // Fallback to default SQLite
   adapterPromise = Promise.resolve(
-    openSQLiteDatabase({ type: 'sqlite', path: config.dbPath, vecLibPath: config.vecLibPath }, 'default').adapter
+    openSQLiteDatabase(
+      { type: 'sqlite', path: config.dbPath, vecLibPath: config.vecLibPath },
+      'default'
+    ).adapter
   );
 }
 
@@ -39,7 +42,7 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 
 const corsAllowList = (process.env.CONTEXT_WHISPER_UI_CORS_ORIGINS || '')
   .split(',')
-  .map(s => s.trim())
+  .map((s) => s.trim())
   .filter(Boolean);
 
 function applyCors(req: http.IncomingMessage, res: http.ServerResponse) {
@@ -62,7 +65,7 @@ const MIMES: Record<string, string> = {
   '.json': 'application/json',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
-  '.svg': 'image/svg+xml'
+  '.svg': 'image/svg+xml',
 };
 
 const server = http.createServer(async (req, res) => {
@@ -84,22 +87,22 @@ const server = http.createServer(async (req, res) => {
   try {
     // Get adapter (wait for initialization)
     const adapter = await adapterPromise;
-    
+
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
-    
+
     // API Routes
     if (url.pathname.startsWith('/api/')) {
       res.setHeader('Content-Type', 'application/json');
-      
+
       if (url.pathname === '/api/topics') {
         const workspace = url.searchParams.get('workspace') || undefined;
         const project = url.searchParams.get('project') || undefined;
-        
+
         const result = await notes.listTopics(adapter, { workspace, project }, cwd);
         res.end(JSON.stringify({ ok: true, ...result }));
         return;
       }
-      
+
       if (url.pathname === '/api/search') {
         const q = url.searchParams.get('q');
         if (!q) {
@@ -107,11 +110,11 @@ const server = http.createServer(async (req, res) => {
           res.end(JSON.stringify({ ok: false, error: 'Missing query parameter "q"' }));
           return;
         }
-        
+
         const workspace = url.searchParams.get('workspace') || undefined;
         const project = url.searchParams.get('project') || undefined;
         const global = url.searchParams.get('global') === 'true';
-        
+
         const result = await notes.searchNotes(
           adapter,
           { query: q, workspace, project, global },
@@ -120,7 +123,7 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ ok: true, ...result }));
         return;
       }
-      
+
       if (url.pathname === '/api/note' && req.method === 'PUT') {
         // Update note metadata (topic/subtopic/status) by note_id
         let body = '';
@@ -156,7 +159,9 @@ const server = http.createServer(async (req, res) => {
         }
         if (review_status !== 'DRAFT' && review_status !== 'APPROVED') {
           res.statusCode = 400;
-          res.end(JSON.stringify({ ok: false, error: 'Invalid review_status (expected DRAFT|APPROVED)' }));
+          res.end(
+            JSON.stringify({ ok: false, error: 'Invalid review_status (expected DRAFT|APPROVED)' })
+          );
           return;
         }
 
@@ -187,7 +192,12 @@ const server = http.createServer(async (req, res) => {
           // UNIQUE(workspace, project, topic, subtopic) conflicts
           if (msg.includes('UNIQUE') || msg.includes('constraint failed')) {
             res.statusCode = 409;
-            res.end(JSON.stringify({ ok: false, error: 'Conflict: a note with the same topic/subtopic already exists' }));
+            res.end(
+              JSON.stringify({
+                ok: false,
+                error: 'Conflict: a note with the same topic/subtopic already exists',
+              })
+            );
             return;
           }
           res.statusCode = 500;
@@ -203,17 +213,13 @@ const server = http.createServer(async (req, res) => {
           res.end(JSON.stringify({ ok: false, error: 'Missing topic parameter' }));
           return;
         }
-        
+
         const subtopic = url.searchParams.get('subtopic') || null;
         const workspace = url.searchParams.get('workspace') || undefined;
         const project = url.searchParams.get('project') || undefined;
-        
-        const result = await notes.getNote(
-          adapter,
-          { topic, subtopic, workspace, project },
-          cwd
-        );
-        
+
+        const result = await notes.getNote(adapter, { topic, subtopic, workspace, project }, cwd);
+
         if (!result.note) {
           res.statusCode = 404;
           res.end(JSON.stringify({ ok: false, error: 'Note not found', ...result }));
@@ -223,11 +229,11 @@ const server = http.createServer(async (req, res) => {
         if (result.note && result.note.tags_json) {
           (result.note as any).tags = JSON.parse(result.note.tags_json);
         }
-        
+
         res.end(JSON.stringify({ ok: true, ...result }));
         return;
       }
-      
+
       res.statusCode = 404;
       res.end(JSON.stringify({ ok: false, error: 'Endpoint not found' }));
       return;
@@ -235,7 +241,7 @@ const server = http.createServer(async (req, res) => {
 
     // Static Files
     let filePath = path.join(PUBLIC_DIR, url.pathname === '/' ? 'index.html' : url.pathname);
-    
+
     // Prevent directory traversal
     if (!filePath.startsWith(PUBLIC_DIR)) {
       res.statusCode = 403;
@@ -251,7 +257,6 @@ const server = http.createServer(async (req, res) => {
       res.statusCode = 404;
       res.end('Not found');
     }
-
   } catch (err) {
     console.error(err);
     res.statusCode = 500;
@@ -277,17 +282,19 @@ process.on('message', (msg) => {
 });
 
 // Start server after adapter is ready
-adapterPromise.then(() => {
-  server.listen(0, '127.0.0.1', () => {
-    const addr = server.address() as any;
-    const port = addr.port;
-    if (process.send) {
-      process.send({ type: 'ready', port, url: `http://127.0.0.1:${port}` });
-    } else {
-      console.log(`Server listening on http://127.0.0.1:${port}`);
-    }
+adapterPromise
+  .then(() => {
+    server.listen(0, '127.0.0.1', () => {
+      const addr = server.address() as any;
+      const port = addr.port;
+      if (process.send) {
+        process.send({ type: 'ready', port, url: `http://127.0.0.1:${port}` });
+      } else {
+        console.log(`Server listening on http://127.0.0.1:${port}`);
+      }
+    });
+  })
+  .catch((err) => {
+    console.error('Failed to initialize adapter:', err);
+    process.exit(1);
   });
-}).catch(err => {
-  console.error('Failed to initialize adapter:', err);
-  process.exit(1);
-});

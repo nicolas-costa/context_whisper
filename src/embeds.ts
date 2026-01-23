@@ -11,13 +11,9 @@ let embedder: FeatureExtractionPipeline | null = null;
  */
 async function getEmbedder(): Promise<FeatureExtractionPipeline> {
   if (!embedder) {
-    embedder = await pipeline(
-      'feature-extraction',
-      'Xenova/all-MiniLM-L6-v2',
-      {
-        quantized: true,
-      }
-    ) as FeatureExtractionPipeline;
+    embedder = (await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', {
+      quantized: true,
+    })) as FeatureExtractionPipeline;
   }
   return embedder;
 }
@@ -66,7 +62,7 @@ export async function embed(text: string): Promise<Float32Array> {
     const shape = tensor?.shape || [];
     const totalElements = shape.reduce((a: number, b: number) => a * b, 1);
     embedding = new Float32Array(totalElements);
-    
+
     // Flatten the tensor
     if (tensor?.data) {
       const data = tensor.data;
@@ -89,12 +85,12 @@ export async function embed(text: string): Promise<Float32Array> {
     const normalized = new Float32Array(384);
     const copyLength = Math.min(embedding.length, 384);
     normalized.set(embedding.slice(0, copyLength));
-    
+
     // If we truncated, warn (this shouldn't happen)
     if (embedding.length < 384) {
       console.warn(`Warning: Embedding dimension mismatch. Expected 384, got ${embedding.length}`);
     }
-    
+
     embedding = normalized;
   }
 
@@ -111,7 +107,3 @@ export async function embed(text: string): Promise<Float32Array> {
 
   return embedding;
 }
-
-
-
-

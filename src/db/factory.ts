@@ -26,14 +26,19 @@ import type {
 } from './adapters/index.js';
 
 // Re-export types for convenience
-export type { EnvironmentConfig, DatabaseAdapter, SQLiteConfig, PostgresConfig, MySQLConfig, QdrantConfig };
+export type {
+  EnvironmentConfig,
+  DatabaseAdapter,
+  SQLiteConfig,
+  PostgresConfig,
+  MySQLConfig,
+  QdrantConfig,
+};
 
 /**
  * Create a database adapter based on environment configuration
  */
-export async function createDatabaseAdapter(
-  config: EnvironmentConfig
-): Promise<DatabaseAdapter> {
+export async function createDatabaseAdapter(config: EnvironmentConfig): Promise<DatabaseAdapter> {
   const { relational, vector, name } = config;
 
   // Case 1: SQLite + sqlite-vec (default, all-in-one)
@@ -55,8 +60,12 @@ export async function createDatabaseAdapter(
   // Case 3: Any relational + Qdrant (split storage)
   if (vector.type === 'qdrant') {
     const qdrantConfig = vector.config as QdrantConfig;
-    
-    let relationalAdapter: SQLiteRelationalAdapter | PostgresRelationalAdapter | MySQLRelationalAdapter | undefined;
+
+    let relationalAdapter:
+      | SQLiteRelationalAdapter
+      | PostgresRelationalAdapter
+      | MySQLRelationalAdapter
+      | undefined;
 
     try {
       switch (relational.type) {
@@ -85,11 +94,7 @@ export async function createDatabaseAdapter(
       await relationalAdapter.initSchema();
 
       // Create combined adapter with Qdrant
-      const combinedAdapter = createQdrantCombinedAdapter(
-        relationalAdapter,
-        qdrantConfig,
-        name
-      );
+      const combinedAdapter = createQdrantCombinedAdapter(relationalAdapter, qdrantConfig, name);
 
       // Initialize Qdrant schema
       await combinedAdapter.vector.initSchema();
@@ -115,11 +120,11 @@ export async function createDatabaseAdapter(
 
 /**
  * Parse environment name prefix from key
- * Examples: 
+ * Examples:
  *   PROD_PG_HOST -> PROD
  *   ACME_CORP_MYSQL_HOST -> ACME_CORP
  *   LOCAL_SQLITE_PATH -> LOCAL
- * 
+ *
  * The key must end with one of the known suffixes:
  *   _SQLITE_PATH, _PG_HOST, _PG_USER, etc., _MYSQL_HOST, etc., _QDRANT_HOST, etc.
  */
@@ -127,13 +132,30 @@ export function parseEnvironmentPrefix(key: string): string | null {
   // Known suffixes that indicate a database config
   const suffixes = [
     '_SQLITE_PATH',
-    '_PG_HOST', '_PG_PORT', '_PG_USER', '_PG_PASSWORD', '_PG_DATABASE', '_PG_SSL', '_PG_SSL_REJECT_UNAUTHORIZED',
-    '_MYSQL_HOST', '_MYSQL_PORT', '_MYSQL_USER', '_MYSQL_PASSWORD', '_MYSQL_DATABASE', '_MYSQL_SSL', '_MYSQL_SSL_REJECT_UNAUTHORIZED',
-    '_QDRANT_HOST', '_QDRANT_PORT', '_QDRANT_API_KEY', '_QDRANT_COLLECTION', '_QDRANT_HTTPS', '_QDRANT_TIMEOUT_MS',
+    '_PG_HOST',
+    '_PG_PORT',
+    '_PG_USER',
+    '_PG_PASSWORD',
+    '_PG_DATABASE',
+    '_PG_SSL',
+    '_PG_SSL_REJECT_UNAUTHORIZED',
+    '_MYSQL_HOST',
+    '_MYSQL_PORT',
+    '_MYSQL_USER',
+    '_MYSQL_PASSWORD',
+    '_MYSQL_DATABASE',
+    '_MYSQL_SSL',
+    '_MYSQL_SSL_REJECT_UNAUTHORIZED',
+    '_QDRANT_HOST',
+    '_QDRANT_PORT',
+    '_QDRANT_API_KEY',
+    '_QDRANT_COLLECTION',
+    '_QDRANT_HTTPS',
+    '_QDRANT_TIMEOUT_MS',
     '_WORKSPACE_WHITELIST',
     '_VECTOR_STORE',
   ];
-  
+
   for (const suffix of suffixes) {
     if (key.endsWith(suffix)) {
       const prefix = key.slice(0, key.length - suffix.length);
@@ -142,7 +164,7 @@ export function parseEnvironmentPrefix(key: string): string | null {
       }
     }
   }
-  
+
   return null;
 }
 
@@ -151,7 +173,7 @@ export function parseEnvironmentPrefix(key: string): string | null {
  */
 export function getEnvironmentNames(envVars: Record<string, string | undefined>): string[] {
   const names = new Set<string>();
-  
+
   for (const key of Object.keys(envVars)) {
     const prefix = parseEnvironmentPrefix(key);
     if (prefix) {
@@ -164,7 +186,7 @@ export function getEnvironmentNames(envVars: Record<string, string | undefined>)
 
 /**
  * Parse environment configuration from env vars
- * 
+ *
  * Supported patterns:
  * - {ENV}_SQLITE_PATH - SQLite database path
  * - {ENV}_PG_HOST, {ENV}_PG_PORT, {ENV}_PG_USER, {ENV}_PG_PASSWORD, {ENV}_PG_DATABASE
@@ -185,13 +207,13 @@ export function parseEnvironmentConfig(
   const allowedWorkspaces = workspaceWhitelistRaw
     ? workspaceWhitelistRaw
         .split(',')
-        .map(s => s.trim())
+        .map((s) => s.trim())
         .filter(Boolean)
     : undefined;
-  
+
   // Check for SQLite config
   const sqlitePath = envVars[`${prefix}SQLITE_PATH`];
-  
+
   // Check for PostgreSQL config
   const pgHost = envVars[`${prefix}PG_HOST`];
   const pgPort = envVars[`${prefix}PG_PORT`];
@@ -218,7 +240,11 @@ export function parseEnvironmentConfig(
   const hasQdrantConfig = qdrantHost;
 
   // Explicit vector store selection
-  const vectorStore = envVars[`${prefix}VECTOR_STORE`] as 'sqlite-vec' | 'pgvector' | 'qdrant' | undefined;
+  const vectorStore = envVars[`${prefix}VECTOR_STORE`] as
+    | 'sqlite-vec'
+    | 'pgvector'
+    | 'qdrant'
+    | undefined;
 
   // Determine relational database
   let relationalConfig: SQLiteConfig | PostgresConfig | MySQLConfig;
@@ -262,7 +288,9 @@ export function parseEnvironmentConfig(
 
   // Enforce whitelist for any configured environment (prevents implicit “catch-all” routing).
   if (!allowedWorkspaces || allowedWorkspaces.length === 0) {
-    throw new Error(`${envName}: WORKSPACE_WHITELIST is required (e.g., ${envName}_WORKSPACE_WHITELIST="consultoria-a,cliente-b")`);
+    throw new Error(
+      `${envName}: WORKSPACE_WHITELIST is required (e.g., ${envName}_WORKSPACE_WHITELIST="consultoria-a,cliente-b")`
+    );
   }
 
   // Determine vector store
@@ -281,9 +309,7 @@ export function parseEnvironmentConfig(
         apiKey: qdrantApiKey,
         collection: qdrantCollection,
         // Secure default: if an API key is set and QDRANT_HTTPS isn't explicitly provided, assume HTTPS.
-        https: qdrantHttps
-          ? qdrantHttps === 'true'
-          : (qdrantApiKey ? true : false),
+        https: qdrantHttps ? qdrantHttps === 'true' : qdrantApiKey ? true : false,
         timeoutMs: qdrantTimeoutMs ? parseInt(qdrantTimeoutMs, 10) : undefined,
       },
     };

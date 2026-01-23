@@ -22,10 +22,7 @@ export function redactSecrets(input: string): string {
   let s = input;
 
   // URLs with credentials: scheme://user:pass@host -> scheme://user:***@host
-  s = s.replace(
-    /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\/\s:@]+):([^\/\s@]+)@/g,
-    '$1:***@'
-  );
+  s = s.replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\/\s:@]+):([^\/\s@]+)@/g, '$1:***@');
 
   // password=... in DSN-like strings
   s = s.replace(/(\bpassword\s*=\s*)([^\s;]+)/gi, '$1***');
@@ -35,5 +32,3 @@ export function redactSecrets(input: string): string {
 
   return s;
 }
-
-

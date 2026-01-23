@@ -23,14 +23,14 @@ export async function startServer(options: ServerOptions): Promise<string> {
 
   const scriptName = 'standalone.js';
   const scriptPath = path.join(__dirname, scriptName);
-  
+
   return new Promise((resolve, reject) => {
     // Pass environment name to the child process
     const envName = options.adapter.environmentName;
-    
+
     child = fork(scriptPath, [process.env.CONTEXT_WHISPER_DB_PATH || '', options.cwd, envName], {
       stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
-      env: { ...process.env }
+      env: { ...process.env },
     });
 
     child.on('message', (msg: any) => {

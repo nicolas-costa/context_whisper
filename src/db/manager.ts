@@ -16,10 +16,7 @@ export class DatabaseManager {
   private initPromises: Map<string, Promise<DatabaseAdapter>> = new Map();
   private allowedEnvironments: Set<string> | null;
 
-  constructor(
-    configs: Map<string, EnvironmentConfig>,
-    defaultEnvironment: string
-  ) {
+  constructor(configs: Map<string, EnvironmentConfig>, defaultEnvironment: string) {
     this.configs = configs;
     this.defaultEnvironment = defaultEnvironment;
 
@@ -38,7 +35,7 @@ export class DatabaseManager {
     if (allowListRaw && allowListRaw.trim().length > 0) {
       const items = allowListRaw
         .split(',')
-        .map(s => s.trim())
+        .map((s) => s.trim())
         .filter(Boolean);
       this.allowedEnvironments = new Set(items);
     } else {
@@ -56,7 +53,7 @@ export class DatabaseManager {
     if (this.allowedEnvironments && !this.allowedEnvironments.has(envName)) {
       throw new Error(
         `Environment '${envName}' is not allowed by allowlist. ` +
-        `Set CONTEXT_WHISPER_ALLOWED_ENVIRONMENTS to include it, or unset the allowlist.`
+          `Set CONTEXT_WHISPER_ALLOWED_ENVIRONMENTS to include it, or unset the allowlist.`
       );
     }
 
@@ -141,8 +138,8 @@ export class DatabaseManager {
    * Close all adapters
    */
   async closeAll(): Promise<void> {
-    const closePromises = Array.from(this.adapters.values()).map(adapter =>
-      adapter.close().catch(err => {
+    const closePromises = Array.from(this.adapters.values()).map((adapter) =>
+      adapter.close().catch((err) => {
         console.error('[context-whisper] Error closing adapter:', err);
       })
     );

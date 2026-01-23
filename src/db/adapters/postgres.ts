@@ -53,15 +53,15 @@ export class PostgresRelationalAdapter implements RelationalAdapter {
 
   async initSchema(): Promise<void> {
     const schema = readFileSync(this.schemaPath, 'utf-8');
-    
+
     // PostgreSQL can execute multiple statements at once, but we handle errors
     // Split by semicolons but be careful with functions/triggers
     const statements = this.splitPostgresStatements(schema);
-    
+
     for (const statement of statements) {
       const trimmed = statement.trim();
       if (!trimmed || trimmed.startsWith('--')) continue;
-      
+
       // Skip vector table - handled by vector adapter
       if (trimmed.includes('CREATE TABLE') && trimmed.includes('note_vectors')) {
         continue;
@@ -69,15 +69,17 @@ export class PostgresRelationalAdapter implements RelationalAdapter {
       if (trimmed.includes('CREATE INDEX') && trimmed.includes('note_vectors')) {
         continue;
       }
-      
+
       try {
         await this.pool.query(trimmed);
       } catch (error: any) {
         // Ignore "already exists" errors
-        if (error.code === '42P07' || // duplicate_table
-            error.code === '42710' || // duplicate_object
-            error.code === '42P16' || // invalid_table_definition (for triggers)
-            error.message?.includes('already exists')) {
+        if (
+          error.code === '42P07' || // duplicate_table
+          error.code === '42710' || // duplicate_object
+          error.code === '42P16' || // invalid_table_definition (for triggers)
+          error.message?.includes('already exists')
+        ) {
           continue;
         }
         throw error;
@@ -161,8 +163,9 @@ export class PostgresRelationalAdapter implements RelationalAdapter {
     repoName?: string | null;
   }): Promise<number> {
     const normalizedSubtopic = params.subtopic || '';
-    
-    const result = await this.pool.query(`
+
+    const result = await this.pool.query(
+      `
       INSERT INTO notes (workspace, project, topic, subtopic, tags_json, body_md, created_by, review_status,
                          repo_url, repo_fingerprint, repo_provider, repo_owner, repo_name)
       VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, 'DRAFT'), $9, $10, $11, $12, $13)
@@ -179,21 +182,23 @@ export class PostgresRelationalAdapter implements RelationalAdapter {
         repo_name=EXCLUDED.repo_name,
         updated_at=CURRENT_TIMESTAMP
       RETURNING note_id
-    `, [
-      params.workspace,
-      params.project,
-      params.topic,
-      normalizedSubtopic,
-      params.tagsJson,
-      params.bodyMd,
-      params.createdBy || null,
-      params.reviewStatus,
-      params.repoUrl || null,
-      params.repoFingerprint || null,
-      params.repoProvider || null,
-      params.repoOwner || null,
-      params.repoName || null,
-    ]);
+    `,
+      [
+        params.workspace,
+        params.project,
+        params.topic,
+        normalizedSubtopic,
+        params.tagsJson,
+        params.bodyMd,
+        params.createdBy || null,
+        params.reviewStatus,
+        params.repoUrl || null,
+        params.repoFingerprint || null,
+        params.repoProvider || null,
+        params.repoOwner || null,
+        params.repoName || null,
+      ]
+    );
 
     return result.rows[0].note_id;
   }
@@ -205,13 +210,16 @@ export class PostgresRelationalAdapter implements RelationalAdapter {
     subtopic?: string | null
   ): Promise<Note | null> {
     const normalizedSubtopic = subtopic || '';
-    
-    const result = await this.pool.query(`
+
+    const result = await this.pool.query(
+      `
       SELECT *
       FROM notes
       WHERE workspace = $1 AND project = $2 AND topic = $3 AND subtopic = $4
       LIMIT 1
-    `, [workspace, project, topic, normalizedSubtopic]);
+    `,
+      [workspace, project, topic, normalizedSubtopic]
+    );
 
     if (result.rows.length === 0) return null;
 
@@ -220,12 +228,15 @@ export class PostgresRelationalAdapter implements RelationalAdapter {
   }
 
   async getNoteById(noteId: number): Promise<Note | null> {
-    const result = await this.pool.query(`
+    const result = await this.pool.query(
+      `
       SELECT *
       FROM notes
       WHERE note_id = $1
       LIMIT 1
-    `, [noteId]);
+    `,
+      [noteId]
+    );
 
     if (result.rows.length === 0) return null;
 
@@ -261,7 +272,8 @@ export class PostgresRelationalAdapter implements RelationalAdapter {
   ): Promise<Note | null> {
     const normalizedSubtopic = subtopic || '';
 
-    const result = await this.pool.query(`
+    const result = await this.pool.query(
+      `
       UPDATE notes
       SET topic = $1,
           subtopic = $2,
@@ -269,7 +281,9 @@ export class PostgresRelationalAdapter implements RelationalAdapter {
           updated_at = CURRENT_TIMESTAMP
       WHERE note_id = $4
       RETURNING *
-    `, [topic, normalizedSubtopic, reviewStatus, noteId]);
+    `,
+      [topic, normalizedSubtopic, reviewStatus, noteId]
+    );
 
     if (result.rows.length === 0) return null;
 
@@ -288,10 +302,7 @@ export class PostgresRelationalAdapter implements RelationalAdapter {
     }
 
     // Delete cascade handles note_links and note_vectors
-    const result = await this.pool.query(
-      'DELETE FROM notes WHERE note_id = $1',
-      [note.note_id]
-    );
+    const result = await this.pool.query('DELETE FROM notes WHERE note_id = $1', [note.note_id]);
 
     return result.rowCount !== null && result.rowCount > 0;
   }
@@ -300,12 +311,15 @@ export class PostgresRelationalAdapter implements RelationalAdapter {
     workspace: string,
     project: string
   ): Promise<Array<{ topic: string; subtopic: string | null }>> {
-    const result = await this.pool.query(`
+    const result = await this.pool.query(
+      `
       SELECT DISTINCT topic, subtopic
       FROM notes
       WHERE workspace = $1 AND project = $2
       ORDER BY topic, subtopic
-    `, [workspace, project]);
+    `,
+      [workspace, project]
+    );
 
     return result.rows.map((r: any) => ({
       topic: r.topic,
@@ -313,39 +327,42 @@ export class PostgresRelationalAdapter implements RelationalAdapter {
     }));
   }
 
-  async upsertNoteLinks(
-    noteId: number,
-    links: Array<Partial<NoteLink>>
-  ): Promise<void> {
+  async upsertNoteLinks(noteId: number, links: Array<Partial<NoteLink>>): Promise<void> {
     await this.pool.query('DELETE FROM note_links WHERE note_id = $1', [noteId]);
 
     if (links.length > 0) {
       for (const link of links) {
-        await this.pool.query(`
+        await this.pool.query(
+          `
           INSERT INTO note_links (note_id, repo, path, symbol, commit_sha, line_start, line_end, markdown_context, markdown_line)
           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        `, [
-          noteId,
-          link.repo || null,
-          link.path || null,
-          link.symbol || null,
-          link.commit_sha || null,
-          link.line_start || null,
-          link.line_end || null,
-          link.markdown_context || null,
-          link.markdown_line || null,
-        ]);
+        `,
+          [
+            noteId,
+            link.repo || null,
+            link.path || null,
+            link.symbol || null,
+            link.commit_sha || null,
+            link.line_start || null,
+            link.line_end || null,
+            link.markdown_context || null,
+            link.markdown_line || null,
+          ]
+        );
       }
     }
   }
 
   async getNoteLinks(noteId: number): Promise<NoteLink[]> {
-    const result = await this.pool.query(`
+    const result = await this.pool.query(
+      `
       SELECT *
       FROM note_links
       WHERE note_id = $1
       ORDER BY markdown_line, line_start
-    `, [noteId]);
+    `,
+      [noteId]
+    );
 
     return result.rows.map((r: any) => ({
       note_id: r.note_id,
@@ -360,16 +377,16 @@ export class PostgresRelationalAdapter implements RelationalAdapter {
     }));
   }
 
-  async upsertRepoPath(
-    repoFingerprint: string,
-    localPath: string
-  ): Promise<void> {
-    await this.pool.query(`
+  async upsertRepoPath(repoFingerprint: string, localPath: string): Promise<void> {
+    await this.pool.query(
+      `
       INSERT INTO repo_paths (repo_fingerprint, local_path, last_seen_at)
       VALUES ($1, $2, CURRENT_TIMESTAMP)
       ON CONFLICT(repo_fingerprint, local_path)
       DO UPDATE SET last_seen_at = CURRENT_TIMESTAMP
-    `, [repoFingerprint, localPath]);
+    `,
+      [repoFingerprint, localPath]
+    );
   }
 
   /**
@@ -433,8 +450,10 @@ export class PostgresVectorAdapter implements VectorAdapter {
       `);
     } catch (error: any) {
       // Ignore index errors - might already exist or need more data
-      if (!error.message?.includes('already exists') && 
-          !error.message?.includes('does not have enough rows')) {
+      if (
+        !error.message?.includes('already exists') &&
+        !error.message?.includes('does not have enough rows')
+      ) {
         console.warn(`[context-whisper] Warning creating vector index: ${error.message}`);
       }
     }
@@ -448,12 +467,15 @@ export class PostgresVectorAdapter implements VectorAdapter {
     // Convert Float32Array to PostgreSQL vector format: [0.1, 0.2, ...]
     const vectorStr = '[' + Array.from(embedding).join(',') + ']';
 
-    await this.pool.query(`
+    await this.pool.query(
+      `
       INSERT INTO note_vectors (note_id, embedding)
       VALUES ($1, $2::vector)
       ON CONFLICT (note_id)
       DO UPDATE SET embedding = EXCLUDED.embedding
-    `, [noteId, vectorStr]);
+    `,
+      [noteId, vectorStr]
+    );
   }
 
   async deleteVector(noteId: number): Promise<void> {
@@ -640,9 +662,7 @@ export async function createPostgresAdapter(
     user: config.user,
     password: config.password,
     database: config.database,
-    ssl: config.ssl
-      ? { rejectUnauthorized: config.sslRejectUnauthorized ?? true }
-      : undefined,
+    ssl: config.ssl ? { rejectUnauthorized: config.sslRejectUnauthorized ?? true } : undefined,
   });
 
   // Test connection

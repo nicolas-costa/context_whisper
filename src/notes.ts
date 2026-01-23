@@ -94,16 +94,16 @@ export interface UpdateNoteMetaResult {
 function parseCodeLinksFromMarkdown(bodyMd: string): Array<Partial<NoteLink>> {
   const links: Array<Partial<NoteLink>> = [];
   const lines = bodyMd.split('\n');
-  
+
   const linkRegex = /\[([^\]]+)\]\(code:([^:\)]+)(?::(\d+)-(\d+))?((?::[^:\)]+)*)\)/g;
 
   lines.forEach((line, lineIndex) => {
     let match;
     linkRegex.lastIndex = 0;
-    
+
     while ((match = linkRegex.exec(line)) !== null) {
       const [fullMatch, text, path, startStr, endStr, extraParams] = match;
-      
+
       const link: Partial<NoteLink> = {
         path: path,
         markdown_context: line.trim(),
@@ -115,7 +115,7 @@ function parseCodeLinksFromMarkdown(bodyMd: string): Array<Partial<NoteLink>> {
 
       if (extraParams) {
         const params = extraParams.split(':').filter(Boolean);
-        params.forEach(param => {
+        params.forEach((param) => {
           if (param.startsWith('symbol=')) {
             link.symbol = param.replace('symbol=', '');
           } else if (param.startsWith('commit=')) {
@@ -148,9 +148,7 @@ export async function upsertNote(
     cwd
   );
 
-  const tagsJson = params.tags && params.tags.length > 0 
-    ? JSON.stringify(params.tags) 
-    : null;
+  const tagsJson = params.tags && params.tags.length > 0 ? JSON.stringify(params.tags) : null;
 
   const embedding = await embeds.embed(params.body_md);
 
@@ -218,9 +216,9 @@ export async function getNote(
 
   if (note) {
     const links = await adapter.relational.getNoteLinks(note.note_id);
-    return { 
-      note: { ...note, links }, 
-      context 
+    return {
+      note: { ...note, links },
+      context,
     };
   }
 
@@ -249,7 +247,7 @@ export async function searchNotes(
   const repoFingerprint = params.global ? undefined : (context.repo_fingerprint ?? undefined);
   const repoUrl = params.global ? undefined : (params.repo_url ?? context.repo_url ?? undefined);
   const workspace = params.global ? null : context.workspace;
-  const project = params.global ? null : (params.project || context.project || null);
+  const project = params.global ? null : params.project || context.project || null;
 
   const results = await adapter.searchNotes(queryEmbedding, {
     workspace,
@@ -330,12 +328,20 @@ export async function deleteNote(
     if (code === '42501') return true;
 
     // MySQL common permission errors (best-effort)
-    if (code.includes('ACCESS_DENIED') || code.includes('ER_TABLEACCESS_DENIED') || code.includes('ER_DBACCESS_DENIED')) {
+    if (
+      code.includes('ACCESS_DENIED') ||
+      code.includes('ER_TABLEACCESS_DENIED') ||
+      code.includes('ER_DBACCESS_DENIED')
+    ) {
       return true;
     }
 
     // Generic messages
-    if (/permission denied/i.test(msg) || /not authorized/i.test(msg) || /insufficient privilege/i.test(msg)) {
+    if (
+      /permission denied/i.test(msg) ||
+      /not authorized/i.test(msg) ||
+      /insufficient privilege/i.test(msg)
+    ) {
       return true;
     }
     // Qdrant may encode status in message
@@ -381,7 +387,9 @@ export async function deleteNote(
       return { deleted: true, context, vector_deleted: false, warnings };
     }
     // Non-permission error: surface but keep deletion result (note already deleted).
-    warnings.push(`Vector delete failed after relational delete: ${err?.message ? String(err.message) : String(err)}`);
+    warnings.push(
+      `Vector delete failed after relational delete: ${err?.message ? String(err.message) : String(err)}`
+    );
     return { deleted: true, context, vector_deleted: false, warnings };
   }
 
@@ -412,11 +420,25 @@ export async function updateNoteMeta(
   }
 
   if (params.workspace && existing.workspace !== params.workspace) {
-    const context = detectContext({ workspace: existing.workspace, project: existing.project, repo_url: existing.repo_url ?? undefined }, cwd);
+    const context = detectContext(
+      {
+        workspace: existing.workspace,
+        project: existing.project,
+        repo_url: existing.repo_url ?? undefined,
+      },
+      cwd
+    );
     return { note: null, context };
   }
   if (params.project && existing.project !== params.project) {
-    const context = detectContext({ workspace: existing.workspace, project: existing.project, repo_url: existing.repo_url ?? undefined }, cwd);
+    const context = detectContext(
+      {
+        workspace: existing.workspace,
+        project: existing.project,
+        repo_url: existing.repo_url ?? undefined,
+      },
+      cwd
+    );
     return { note: null, context };
   }
 
@@ -429,9 +451,9 @@ export async function updateNoteMeta(
 
   const context = detectContext(
     {
-      workspace: (updated?.workspace ?? existing.workspace),
-      project: (updated?.project ?? existing.project),
-      repo_url: (updated?.repo_url ?? existing.repo_url) ?? undefined,
+      workspace: updated?.workspace ?? existing.workspace,
+      project: updated?.project ?? existing.project,
+      repo_url: updated?.repo_url ?? existing.repo_url ?? undefined,
     },
     cwd
   );

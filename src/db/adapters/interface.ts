@@ -1,6 +1,6 @@
 /**
  * Database Adapter Interface
- * 
+ *
  * Defines the contract for all database adapters (SQLite, PostgreSQL, MySQL).
  * Supports both relational data and vector search capabilities.
  */
@@ -116,19 +116,19 @@ export interface EnvironmentConfig {
 export interface RelationalAdapter {
   /** Database type identifier */
   readonly type: DatabaseType;
-  
+
   /** Check if connection is healthy */
   isHealthy(): Promise<boolean>;
-  
+
   /** Initialize database schema */
   initSchema(): Promise<void>;
-  
+
   /** Get current schema version */
   getSchemaVersion(): Promise<number>;
-  
+
   /** Close database connection */
   close(): Promise<void>;
-  
+
   // Note operations
   upsertNote(params: {
     workspace: string;
@@ -145,48 +145,42 @@ export interface RelationalAdapter {
     repoOwner?: string | null;
     repoName?: string | null;
   }): Promise<number>;
-  
+
   getNote(
     workspace: string,
     project: string,
     topic: string,
     subtopic?: string | null
   ): Promise<Note | null>;
-  
+
   getNoteById(noteId: number): Promise<Note | null>;
-  
+
   updateNoteMeta(
     noteId: number,
     topic: string,
     subtopic: string | null,
     reviewStatus: 'DRAFT' | 'APPROVED'
   ): Promise<Note | null>;
-  
+
   deleteNote(
     workspace: string,
     project: string,
     topic: string,
     subtopic?: string | null
   ): Promise<boolean>;
-  
+
   listTopics(
     workspace: string,
     project: string
   ): Promise<Array<{ topic: string; subtopic: string | null }>>;
-  
+
   // Link operations
-  upsertNoteLinks(
-    noteId: number,
-    links: Array<Partial<NoteLink>>
-  ): Promise<void>;
-  
+  upsertNoteLinks(noteId: number, links: Array<Partial<NoteLink>>): Promise<void>;
+
   getNoteLinks(noteId: number): Promise<NoteLink[]>;
-  
+
   // Repo path operations
-  upsertRepoPath(
-    repoFingerprint: string,
-    localPath: string
-  ): Promise<void>;
+  upsertRepoPath(repoFingerprint: string, localPath: string): Promise<void>;
 }
 
 /**
@@ -196,23 +190,23 @@ export interface RelationalAdapter {
 export interface VectorAdapter {
   /** Vector store type identifier */
   readonly type: VectorStoreType;
-  
+
   /** Check if connection is healthy */
   isHealthy(): Promise<boolean>;
-  
+
   /** Initialize vector store (create collection/table if needed) */
   initSchema(): Promise<void>;
-  
+
   /** Close connection */
   close(): Promise<void>;
-  
+
   /** Upsert (insert or update) a vector for a note */
   upsertVector(noteId: number, embedding: Float32Array): Promise<void>;
-  
+
   /** Delete vector for a note */
   deleteVector(noteId: number): Promise<void>;
-  
-  /** 
+
+  /**
    * Search for similar vectors
    * Returns note_ids with distances, sorted by similarity (ascending distance)
    */
@@ -233,16 +227,16 @@ export interface DatabaseAdapter {
   readonly relational: RelationalAdapter;
   readonly vector: VectorAdapter;
   readonly environmentName: string;
-  
+
   /** Check if all connections are healthy */
   isHealthy(): Promise<{ relational: boolean; vector: boolean }>;
-  
+
   /** Initialize all schemas */
   initSchema(): Promise<void>;
-  
+
   /** Close all connections */
   close(): Promise<void>;
-  
+
   /**
    * Search notes using vector similarity with relational filtering
    * This combines vector search with relational filters

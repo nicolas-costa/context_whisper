@@ -50,13 +50,13 @@ export class SQLiteRelationalAdapter implements RelationalAdapter {
 
   async initSchema(): Promise<void> {
     const schema = readFileSync(this.schemaPath, 'utf-8');
-    
+
     // Split schema into statements and execute individually
     const statements = schema
       .split(';')
-      .map(s => s.trim())
-      .filter(s => s.length > 0 && !s.startsWith('--'));
-    
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0 && !s.startsWith('--'));
+
     for (const statement of statements) {
       try {
         // Skip vec0 virtual table - handled by vector adapter
@@ -77,7 +77,9 @@ export class SQLiteRelationalAdapter implements RelationalAdapter {
 
   async getSchemaVersion(): Promise<number> {
     try {
-      const result = this.db.prepare('SELECT MAX(version) as version FROM schema_version').get() as { version: number } | undefined;
+      const result = this.db.prepare('SELECT MAX(version) as version FROM schema_version').get() as
+        | { version: number }
+        | undefined;
       return result?.version || 1;
     } catch {
       return 1;
@@ -104,7 +106,7 @@ export class SQLiteRelationalAdapter implements RelationalAdapter {
     repoName?: string | null;
   }): Promise<number> {
     const normalizedSubtopic = params.subtopic || '';
-    
+
     const stmt = this.db.prepare(`
       INSERT INTO notes (workspace, project, topic, subtopic, tags_json, body_md, created_by, review_status,
                          repo_url, repo_fingerprint, repo_provider, repo_owner, repo_name)
@@ -142,13 +144,21 @@ export class SQLiteRelationalAdapter implements RelationalAdapter {
 
     // If it was an update, get the existing note_id
     if (result.changes === 0) {
-      const existing = await this.getNote(params.workspace, params.project, params.topic, params.subtopic);
+      const existing = await this.getNote(
+        params.workspace,
+        params.project,
+        params.topic,
+        params.subtopic
+      );
       const existingId = existing?.note_id ?? result.lastInsertRowid;
       const noteId = typeof existingId === 'bigint' ? Number(existingId) : existingId;
       return Math.floor(Number(noteId));
     }
 
-    const noteId = typeof result.lastInsertRowid === 'bigint' ? Number(result.lastInsertRowid) : result.lastInsertRowid;
+    const noteId =
+      typeof result.lastInsertRowid === 'bigint'
+        ? Number(result.lastInsertRowid)
+        : result.lastInsertRowid;
     return Math.floor(Number(noteId));
   }
 
@@ -159,7 +169,7 @@ export class SQLiteRelationalAdapter implements RelationalAdapter {
     subtopic?: string | null
   ): Promise<Note | null> {
     const normalizedSubtopic = subtopic || '';
-    
+
     const stmt = this.db.prepare(`
       SELECT *
       FROM notes
@@ -252,18 +262,18 @@ export class SQLiteRelationalAdapter implements RelationalAdapter {
       ORDER BY topic, subtopic
     `);
 
-    const results = stmt.all({ ws: workspace, project }) as Array<{ topic: string; subtopic: string | null }>;
-    
+    const results = stmt.all({ ws: workspace, project }) as Array<{
+      topic: string;
+      subtopic: string | null;
+    }>;
+
     return results.map((r) => ({
       topic: r.topic,
       subtopic: r.subtopic === '' ? null : r.subtopic,
     }));
   }
 
-  async upsertNoteLinks(
-    noteId: number,
-    links: Array<Partial<NoteLink>>
-  ): Promise<void> {
+  async upsertNoteLinks(noteId: number, links: Array<Partial<NoteLink>>): Promise<void> {
     this.db.prepare('DELETE FROM note_links WHERE note_id = ?').run(noteId);
 
     if (links.length > 0) {
@@ -302,10 +312,7 @@ export class SQLiteRelationalAdapter implements RelationalAdapter {
     return stmt.all(noteId) as NoteLink[];
   }
 
-  async upsertRepoPath(
-    repoFingerprint: string,
-    localPath: string
-  ): Promise<void> {
+  async upsertRepoPath(repoFingerprint: string, localPath: string): Promise<void> {
     const stmt = this.db.prepare(`
       INSERT INTO repo_paths (repo_fingerprint, local_path, last_seen_at)
       VALUES (:repo_fingerprint, :local_path, datetime('now'))
@@ -348,7 +355,9 @@ export class SQLiteVectorAdapter implements VectorAdapter {
     } catch {
       // Fallback: check if note_vectors table exists and is accessible
       try {
-        const tableCheck = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='note_vectors'").get();
+        const tableCheck = this.db
+          .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='note_vectors'")
+          .get();
         if (tableCheck) {
           this.db.prepare('SELECT COUNT(*) FROM note_vectors LIMIT 1').get();
           return true;
@@ -371,8 +380,13 @@ export class SQLiteVectorAdapter implements VectorAdapter {
       `);
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
-      if (errorMsg.includes('no such module') && (errorMsg.includes('vec0') || errorMsg.includes('cev0'))) {
-        throw new Error('vec0 module is required but not available. Vector search is essential for RAG.');
+      if (
+        errorMsg.includes('no such module') &&
+        (errorMsg.includes('vec0') || errorMsg.includes('cev0'))
+      ) {
+        throw new Error(
+          'vec0 module is required but not available. Vector search is essential for RAG.'
+        );
       }
       throw error;
     }
@@ -385,7 +399,7 @@ export class SQLiteVectorAdapter implements VectorAdapter {
   async upsertVector(noteId: number, embedding: Float32Array): Promise<void> {
     const numNoteId = typeof noteId === 'bigint' ? Number(noteId) : noteId;
     let intNoteId: number;
-    
+
     if (Number.isInteger(numNoteId)) {
       intNoteId = numNoteId;
     } else if (Number.isFinite(numNoteId)) {
@@ -393,23 +407,23 @@ export class SQLiteVectorAdapter implements VectorAdapter {
     } else {
       throw new Error(`Invalid note_id: ${noteId}. Must be a finite number.`);
     }
-    
+
     if (!Number.isSafeInteger(intNoteId) || intNoteId <= 0 || intNoteId > Number.MAX_SAFE_INTEGER) {
       throw new Error(`Invalid note_id: ${intNoteId}. Must be a safe positive integer.`);
     }
-    
+
     const buffer = Buffer.from(embedding.buffer, embedding.byteOffset, embedding.byteLength);
 
     // vec0 doesn't support ON CONFLICT, so DELETE then INSERT
     const deleteStmt = this.db.prepare('DELETE FROM note_vectors WHERE note_id = ?');
     deleteStmt.run(intNoteId);
-    
+
     const finalNoteId = intNoteId | 0;
-    
+
     if (!Number.isInteger(finalNoteId) || finalNoteId <= 0) {
       throw new Error(`Failed to ensure integer type: ${intNoteId} -> ${finalNoteId}`);
     }
-    
+
     // Bind Buffer directly (avoid raw SQL interpolation).
     // vec0 is strict about the PK type; enforce INTEGER via CAST.
     const insertStmt = this.db.prepare(
@@ -446,10 +460,10 @@ export class SQLiteVectorAdapter implements VectorAdapter {
     let filteredResults = results;
     if (filter?.noteIds && filter.noteIds.length > 0) {
       const noteIdSet = new Set(filter.noteIds);
-      filteredResults = results.filter(r => noteIdSet.has(r.note_id));
+      filteredResults = results.filter((r) => noteIdSet.has(r.note_id));
     }
 
-    return filteredResults.map(r => ({
+    return filteredResults.map((r) => ({
       noteId: r.note_id,
       distance: r.distance,
     }));
@@ -577,11 +591,11 @@ export function openSQLiteDatabase(
   environmentName: string = 'default'
 ): { db: Database.Database; adapter: SQLiteDatabaseAdapter } {
   const db = new Database(config.path);
-  
+
   // Configure SQLite pragmas
   db.pragma('journal_mode = WAL');
   db.pragma('synchronous = NORMAL');
-  
+
   // Load sqlite-vec extension
   if (!config.vecLibPath) {
     throw new Error('sqlite-vec extension not found. Vector search is REQUIRED for RAG.');
@@ -591,17 +605,27 @@ export function openSQLiteDatabase(
     db.loadExtension(config.vecLibPath);
     // Verify extension is loaded
     try {
-      db.exec('CREATE VIRTUAL TABLE IF NOT EXISTS _vec_init_test USING vec0(id INTEGER PRIMARY KEY, embedding FLOAT[384])');
+      db.exec(
+        'CREATE VIRTUAL TABLE IF NOT EXISTS _vec_init_test USING vec0(id INTEGER PRIMARY KEY, embedding FLOAT[384])'
+      );
       db.exec('DROP TABLE IF EXISTS _vec_init_test');
     } catch (verifyError) {
       const verifyMsg = verifyError instanceof Error ? verifyError.message : String(verifyError);
-      if (verifyMsg.includes('no such module') && (verifyMsg.includes('vec0') || verifyMsg.includes('cev0'))) {
-        throw new Error(`sqlite-vec extension loaded but vec0 module not available. Path: ${config.vecLibPath}`);
+      if (
+        verifyMsg.includes('no such module') &&
+        (verifyMsg.includes('vec0') || verifyMsg.includes('cev0'))
+      ) {
+        throw new Error(
+          `sqlite-vec extension loaded but vec0 module not available. Path: ${config.vecLibPath}`
+        );
       }
     }
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
-    console.error(`[context-whisper] ERROR: Failed to load sqlite-vec extension from ${config.vecLibPath}:`, errorMsg);
+    console.error(
+      `[context-whisper] ERROR: Failed to load sqlite-vec extension from ${config.vecLibPath}:`,
+      errorMsg
+    );
     throw error;
   }
 

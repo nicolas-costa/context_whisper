@@ -1,6 +1,6 @@
 /**
  * Database Module - Re-exports from adapter system
- * 
+ *
  * This module provides convenient access to database types and the manager.
  * All actual implementation is in ./db/adapters/
  */
@@ -30,4 +30,8 @@ export { createDatabaseAdapter, createDefaultSQLiteConfig } from './db/factory.j
 export { openSQLiteDatabase, SQLiteDatabaseAdapter } from './db/adapters/sqlite.js';
 export { createPostgresAdapter, PostgresDatabaseAdapter } from './db/adapters/postgres.js';
 export { createMySQLAdapter, MySQLRelationalAdapter } from './db/adapters/mysql.js';
-export { createQdrantAdapter, createQdrantCombinedAdapter, QdrantVectorAdapter } from './db/adapters/qdrant.js';
+export {
+  createQdrantAdapter,
+  createQdrantCombinedAdapter,
+  QdrantVectorAdapter,
+} from './db/adapters/qdrant.js';

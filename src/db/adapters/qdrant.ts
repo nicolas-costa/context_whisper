@@ -43,22 +43,19 @@ export class QdrantVectorAdapter implements VectorAdapter {
     this.baseUrl = `${protocol}://${config.host}:${config.port}`;
     this.apiKey = config.apiKey;
     this.collectionName = config.collection || DEFAULT_COLLECTION_NAME;
-    this.timeoutMs = typeof config.timeoutMs === 'number' && config.timeoutMs > 0 ? config.timeoutMs : 30_000;
+    this.timeoutMs =
+      typeof config.timeoutMs === 'number' && config.timeoutMs > 0 ? config.timeoutMs : 30_000;
 
     if (this.apiKey && !config.https) {
       // This is not just "less secure" — it's transmitting secrets in cleartext on the network.
       console.error(
         `[context-whisper] SECURITY WARNING: Qdrant is configured with an API key over HTTP (https=false). ` +
-        `This exposes the API key to interception. Set {ENV}_QDRANT_HTTPS=true.`
+          `This exposes the API key to interception. Set {ENV}_QDRANT_HTTPS=true.`
       );
     }
   }
 
-  private async request(
-    method: string,
-    path: string,
-    body?: any
-  ): Promise<any> {
+  private async request(method: string, path: string, body?: any): Promise<any> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
@@ -124,7 +121,11 @@ export class QdrantVectorAdapter implements VectorAdapter {
     } catch (error: any) {
       const msg = error?.message ? String(error.message) : String(error);
       // 409 / "already exists" should be ignored for concurrent starts.
-      if (!msg.includes('409') && !msg.toLowerCase().includes('already exists') && !msg.toLowerCase().includes('conflict')) {
+      if (
+        !msg.includes('409') &&
+        !msg.toLowerCase().includes('already exists') &&
+        !msg.toLowerCase().includes('conflict')
+      ) {
         throw error;
       }
     }
@@ -137,7 +138,11 @@ export class QdrantVectorAdapter implements VectorAdapter {
       });
     } catch (error: any) {
       const msg = error?.message ? String(error.message) : String(error);
-      if (!msg.includes('409') && !msg.toLowerCase().includes('already exists') && !msg.toLowerCase().includes('conflict')) {
+      if (
+        !msg.includes('409') &&
+        !msg.toLowerCase().includes('already exists') &&
+        !msg.toLowerCase().includes('conflict')
+      ) {
         throw error;
       }
     }
@@ -207,7 +212,7 @@ export class QdrantVectorAdapter implements VectorAdapter {
    * Batch upsert vectors
    */
   async upsertVectors(vectors: Array<{ noteId: number; embedding: Float32Array }>): Promise<void> {
-    const points: QdrantPoint[] = vectors.map(v => ({
+    const points: QdrantPoint[] = vectors.map((v) => ({
       id: v.noteId,
       vector: Array.from(v.embedding),
       payload: {
@@ -290,11 +295,15 @@ export class QdrantCombinedAdapter implements DatabaseAdapter {
 
     // Strategy: First get filtered note IDs from relational DB, then search vectors
     // This ensures consistency with filters
-    
+
     // Check if we have any filters
-    const hasFilters = options.workspace || options.project || 
-                       options.tags?.length || options.reviewStatus ||
-                       options.repoFingerprint || options.repoUrl;
+    const hasFilters =
+      options.workspace ||
+      options.project ||
+      options.tags?.length ||
+      options.reviewStatus ||
+      options.repoFingerprint ||
+      options.repoUrl;
 
     let filteredNoteIds: number[] | undefined;
 
@@ -304,7 +313,7 @@ export class QdrantCombinedAdapter implements DatabaseAdapter {
       const adapter = this.relational as any;
       if (typeof adapter.getFilteredNoteIds === 'function') {
         const ids = await adapter.getFilteredNoteIds(options);
-        
+
         // If no notes match filters, return empty
         if (ids.length === 0) {
           return [];
@@ -322,16 +331,16 @@ export class QdrantCombinedAdapter implements DatabaseAdapter {
     );
 
     // Get full notes from relational DB
-    const noteIds = vectorResults.map(r => r.noteId);
-    
+    const noteIds = vectorResults.map((r) => r.noteId);
+
     // Build a map of distances
     const distanceMap = new Map<number, number>();
-    vectorResults.forEach(r => distanceMap.set(r.noteId, r.distance));
+    vectorResults.forEach((r) => distanceMap.set(r.noteId, r.distance));
 
     // Fetch notes
     const adapter = this.relational as any;
     let notes: any[] = [];
-    
+
     if (typeof adapter.getNotesByIds === 'function') {
       notes = await adapter.getNotesByIds(noteIds);
     } else {
@@ -344,7 +353,7 @@ export class QdrantCombinedAdapter implements DatabaseAdapter {
 
     // Combine notes with distances and sort by distance
     const results: SearchResult[] = notes
-      .map(note => ({
+      .map((note) => ({
         ...note,
         distance: distanceMap.get(note.note_id) ?? 1,
       }))

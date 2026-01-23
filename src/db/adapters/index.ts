@@ -22,11 +22,7 @@ export {
 } from './postgres.js';
 
 // MySQL adapter
-export {
-  MySQLRelationalAdapter,
-  createMySQLAdapter,
-  createMySQLPool,
-} from './mysql.js';
+export { MySQLRelationalAdapter, createMySQLAdapter, createMySQLPool } from './mysql.js';
 
 // Qdrant adapter
 export {
