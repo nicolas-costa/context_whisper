@@ -4,6 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { openSQLiteDatabase } from '../db.js';
 import * as notes from '../notes.js';
+import { resolveActingAccount } from '../accounts.js';
 import { resolveConfig, getEnvironmentConfig } from '../config.js';
 import { createDatabaseAdapter } from '../db/factory.js';
 
@@ -118,7 +119,8 @@ const server = http.createServer(async (req, res) => {
         const result = await notes.searchNotes(
           adapter,
           { query: q, workspace, project, global },
-          cwd
+          cwd,
+          await resolveActingAccount(adapter)
         );
         res.end(JSON.stringify({ ok: true, ...result }));
         return;
@@ -176,7 +178,8 @@ const server = http.createServer(async (req, res) => {
               workspace,
               project,
             },
-            cwd
+            cwd,
+            await resolveActingAccount(adapter)
           );
 
           if (!result.note) {

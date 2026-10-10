@@ -11,6 +11,7 @@ import type { DatabaseManager } from './db.js';
 import * as notes from './notes.js';
 import { normalizeRepoUrl } from './context-detector.js';
 import { startServer, stopServer } from './web/server.js';
+import { resolveActingAccount } from './accounts.js';
 
 function getGitRemoteOriginUrl(cwd: string): string | null {
   try {
@@ -35,10 +36,10 @@ function errorResponse(error: string, details?: any) {
 
 function resolveRepoContextStrict(params: { repo_url: string; cwd: string }):
   | {
-      workspace: string;
-      project: string;
-      repo_url: string;
-    }
+    workspace: string;
+    project: string;
+    repo_url: string;
+  }
   | { error: any } {
   const normalizedPayload = normalizeRepoUrl(params.repo_url);
   if (!normalizedPayload) {
@@ -254,7 +255,7 @@ Use 'upsert_note' quando:
 
 DICAS PARA upsert_note:
 - Sempre forneça 'created_by' no formato: "git_user_name (agent_name)"
-- Use 'review_status: "DRAFT"' para decisões em desenvolvimento, "APPROVED" para decisões estabelecidas
+- upsert_note grava DRAFT. Nota estabelecida só entra por approve_note
 
 REFERÊNCIAS A CÓDIGO-FONTE INLINE:
 
@@ -423,7 +424,8 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
         },
         {
           name: 'delete_note',
-          description: 'Remove uma nota técnica e todos os dados associados (vetor, links).',
+          description:
+            'Soft-delete de uma nota. A linha fica para auditoria, some da busca e o vetor é removido.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -441,6 +443,58 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
                 description: 'REQUIRED. Full git repository URL onde a nota está armazenada.',
               },
               topic: { type: 'string', description: 'Tópico da nota a ser removida' },
+              subtopic: { type: 'string', description: 'Subtópico opcional', nullable: true },
+            },
+            required: ['cwd', 'repo_url', 'topic'],
+          },
+        },
+        {
+          name: 'approve_note',
+          description:
+            'Marca uma nota viva como APPROVED. Exige conta tech_lead quando CONTEXT_WHISPER_ACCOUNT_TOKEN está definido.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              cwd: {
+                type: 'string',
+                description:
+                  'REQUIRED. Local working directory of the git repository. Used to verify repo_url via git remote.',
+              },
+              environment: {
+                type: 'string',
+                description: envDescription,
+              },
+              repo_url: {
+                type: 'string',
+                description: 'REQUIRED. Full git repository URL onde a nota está armazenada.',
+              },
+              topic: { type: 'string', description: 'Tópico da nota a aprovar' },
+              subtopic: { type: 'string', description: 'Subtópico opcional', nullable: true },
+            },
+            required: ['cwd', 'repo_url', 'topic'],
+          },
+        },
+        {
+          name: 'purge_note',
+          description:
+            'Apaga de vez uma nota já soft-deleted. Exige conta tech_lead quando CONTEXT_WHISPER_ACCOUNT_TOKEN está definido.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              cwd: {
+                type: 'string',
+                description:
+                  'REQUIRED. Local working directory of the git repository. Used to verify repo_url via git remote.',
+              },
+              environment: {
+                type: 'string',
+                description: envDescription,
+              },
+              repo_url: {
+                type: 'string',
+                description: 'REQUIRED. Full git repository URL onde a nota está armazenada.',
+              },
+              topic: { type: 'string', description: 'Tópico da nota já removida' },
               subtopic: { type: 'string', description: 'Subtópico opcional', nullable: true },
             },
             required: ['cwd', 'repo_url', 'topic'],
@@ -580,7 +634,8 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
           const result = await notes.upsertNote(
             adapter,
             paramsWithContext as notes.UpsertNoteParams,
-            rawParams.cwd
+            rawParams.cwd,
+            await resolveActingAccount(adapter)
           );
 
           return {
@@ -727,7 +782,8 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
             const result = await notes.searchNotes(
               adapter,
               paramsWithContext as notes.SearchNotesParams,
-              rawParams.cwd!
+              rawParams.cwd!,
+              await resolveActingAccount(adapter)
             );
 
             const resultsWithParsedTags = result.notes.map((r) => ({
@@ -789,7 +845,8 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
             const result = await notes.searchNotes(
               adapter,
               paramsWithContext as notes.SearchNotesParams,
-              rawParams.cwd || undefined
+              rawParams.cwd || undefined,
+              await resolveActingAccount(adapter)
             );
 
             const resultsWithParsedTags = result.notes.map((r) => ({
@@ -910,7 +967,8 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
           const result = await notes.deleteNote(
             adapter,
             paramsWithContext as notes.DeleteNoteParams,
-            rawParams.cwd
+            rawParams.cwd,
+            await resolveActingAccount(adapter)
           );
 
           return {
@@ -927,6 +985,115 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
                       ? {}
                       : { vector_deleted: result.vector_deleted }),
                     ...(result.warnings?.length ? { warnings: result.warnings } : {}),
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+          };
+        }
+
+        case 'approve_note': {
+          const rawParams = DeleteNoteSchema.parse(args);
+          const repoContext = resolveRepoContextStrict({
+            repo_url: rawParams.repo_url,
+            cwd: rawParams.cwd,
+          });
+          if ('error' in repoContext) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify(repoContext.error, null, 2) }],
+              isError: true,
+            };
+          }
+          const envResolved = resolveEnvironmentForWorkspace(
+            dbManager,
+            repoContext.workspace,
+            rawParams.environment
+          );
+          if ('error' in envResolved) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify(envResolved.error, null, 2) }],
+              isError: true,
+            };
+          }
+          const adapter = await dbManager.getAdapter(envResolved.envName);
+          const result = await notes.approveNote(
+            adapter,
+            {
+              ...rawParams,
+              repo_url: repoContext.repo_url,
+              workspace: repoContext.workspace,
+              project: repoContext.project,
+            } as notes.DeleteNoteParams,
+            rawParams.cwd,
+            await resolveActingAccount(adapter)
+          );
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(
+                  {
+                    ok: result.note !== null,
+                    environment: envResolved.envName,
+                    context: result.context,
+                    note_id: result.note?.note_id ?? null,
+                    review_status: result.note?.review_status ?? null,
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+          };
+        }
+
+        case 'purge_note': {
+          const rawParams = DeleteNoteSchema.parse(args);
+          const repoContext = resolveRepoContextStrict({
+            repo_url: rawParams.repo_url,
+            cwd: rawParams.cwd,
+          });
+          if ('error' in repoContext) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify(repoContext.error, null, 2) }],
+              isError: true,
+            };
+          }
+          const envResolved = resolveEnvironmentForWorkspace(
+            dbManager,
+            repoContext.workspace,
+            rawParams.environment
+          );
+          if ('error' in envResolved) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify(envResolved.error, null, 2) }],
+              isError: true,
+            };
+          }
+          const adapter = await dbManager.getAdapter(envResolved.envName);
+          const result = await notes.purgeNote(
+            adapter,
+            {
+              ...rawParams,
+              repo_url: repoContext.repo_url,
+              workspace: repoContext.workspace,
+              project: repoContext.project,
+            } as notes.DeleteNoteParams,
+            rawParams.cwd,
+            await resolveActingAccount(adapter)
+          );
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(
+                  {
+                    ok: true,
+                    environment: envResolved.envName,
+                    context: result.context,
+                    purged: result.deleted,
                   },
                   null,
                   2

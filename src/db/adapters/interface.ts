@@ -5,6 +5,14 @@
  * Supports both relational data and vector search capabilities.
  */
 
+export interface Account {
+  account_id: number;
+  name: string;
+  role: 'engineer' | 'tech_lead';
+  /** Empty/null means the account is not further restricted by workspace. */
+  workspaces: string[] | null;
+}
+
 export interface Note {
   note_id: number;
   workspace: string;
@@ -168,6 +176,19 @@ export interface RelationalAdapter {
     topic: string,
     subtopic?: string | null
   ): Promise<boolean>;
+
+  /** Hard-delete a note that was already soft-deleted. */
+  purgeNote(
+    workspace: string,
+    project: string,
+    topic: string,
+    subtopic?: string | null
+  ): Promise<boolean>;
+
+  approveNote(noteId: number): Promise<Note | null>;
+
+  /** Lookup by SHA-256 hex of the account token. Does not return the hash. */
+  resolveAccount(tokenHash: string): Promise<Account | null>;
 
   listTopics(
     workspace: string,

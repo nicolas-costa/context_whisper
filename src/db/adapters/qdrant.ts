@@ -308,25 +308,33 @@ export class QdrantCombinedAdapter implements DatabaseAdapter {
     let filteredNoteIds: number[] | undefined;
 
     if (hasFilters) {
-      // Get filtered note IDs from relational adapter
-      // We need to implement a method for this - cast to extended interface
-      const adapter = this.relational as any;
-      if (typeof adapter.getFilteredNoteIds === 'function') {
-        const ids = await adapter.getFilteredNoteIds(options);
-
-        // If no notes match filters, return empty
-        if (ids.length === 0) {
-          return [];
-        }
-        filteredNoteIds = ids;
+      const adapter = this.relational as RelationalAdapter & {
+        getFilteredNoteIds?: (opts: {
+          workspace?: string | null;
+          project?: string | null;
+          tags?: string[] | null;
+          reviewStatus?: string | null;
+          repoFingerprint?: string | null;
+          repoUrl?: string | null;
+        }) => Promise<number[]> | number[];
+      };
+      if (typeof adapter.getFilteredNoteIds !== 'function') {
+        throw new Error(
+          `Relational adapter '${this.relational.type}' does not implement getFilteredNoteIds. ` +
+            `Refusing unfiltered vector search because it would ignore workspace, project, and tag filters.`
+        );
       }
+      const ids = await adapter.getFilteredNoteIds(options);
+      if (ids.length === 0) {
+        return [];
+      }
+      filteredNoteIds = ids;
     }
 
-    // Search vectors with filter
+    // has_id is applied inside Qdrant, so limit is already post-filter.
     const vectorResults = await this.vector.searchVectors(
       queryVector,
-      // Request more results if filtering, to ensure we get enough after filtering
-      filteredNoteIds ? Math.min(topK * 3, 100) : topK,
+      topK,
       filteredNoteIds ? { noteIds: filteredNoteIds } : undefined
     );
 

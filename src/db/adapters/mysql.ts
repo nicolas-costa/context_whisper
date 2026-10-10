@@ -9,10 +9,21 @@ import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { redactSecrets, truncate } from '../../security.js';
-import type { RelationalAdapter, Note, NoteLink, MySQLConfig } from './interface.js';
+import { stripLeadingSqlComments } from '../sql-script.js';
+import { applyMigrations } from '../migrate.js';
+import type { Account, RelationalAdapter, Note, NoteLink, MySQLConfig } from './interface.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+function parseWorkspaces(raw: string | null): string[] | null {
+  if (!raw) return null;
+  const items = raw
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return items.length > 0 ? items : null;
+}
 
 function escapeLike(input: string): string {
   // Escape LIKE wildcards and escape char for MySQL patterns.
@@ -48,8 +59,8 @@ export class MySQLRelationalAdapter implements RelationalAdapter {
     // Split by semicolons and execute each statement
     const statements = schema
       .split(';')
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0 && !s.startsWith('--'));
+      .map((s) => stripLeadingSqlComments(s))
+      .filter((s) => s.length > 0);
 
     for (const statement of statements) {
       try {
@@ -68,6 +79,61 @@ export class MySQLRelationalAdapter implements RelationalAdapter {
         throw error;
       }
     }
+
+    await this.ensureFullScopeUniqueness();
+
+    await applyMigrations({
+      dir: join(__dirname, '..', '..', '..', 'sql', 'mysql', 'migrations'),
+      currentVersion: await this.getSchemaVersion(),
+      execute: async (sql) => {
+        await this.pool.query(sql);
+      },
+      recordVersion: async (version) => {
+        await this.pool.query('INSERT IGNORE INTO schema_version (version) VALUES (?)', [version]);
+      },
+    });
+  }
+
+  /**
+   * Replace the old prefix UNIQUE (workspace(100), topic(200), ...) with a
+   * generated SHA-256 of the full scope. CREATE TABLE IF NOT EXISTS does not
+   * alter a table that was created by an earlier revision of this schema.
+   */
+  private async ensureFullScopeUniqueness(): Promise<void> {
+    const [cols] = (await this.pool.query(
+      `
+      SELECT COUNT(*) AS c
+      FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'notes'
+        AND COLUMN_NAME = 'scope_hash'
+    `
+    )) as any;
+
+    if (Number(cols[0]?.c) > 0) return;
+
+    const [idx] = (await this.pool.query(
+      `
+      SELECT COUNT(*) AS c
+      FROM information_schema.STATISTICS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'notes'
+        AND INDEX_NAME = 'uq_notes_scope'
+    `
+    )) as any;
+
+    if (Number(idx[0]?.c) > 0) {
+      await this.pool.query('ALTER TABLE notes DROP INDEX uq_notes_scope');
+    }
+
+    await this.pool.query(`
+      ALTER TABLE notes
+        ADD COLUMN scope_hash CHAR(64)
+          GENERATED ALWAYS AS (
+            SHA2(CONCAT_WS(UNHEX('1F'), workspace, project, topic, subtopic), 256)
+          ) STORED,
+        ADD UNIQUE KEY uq_notes_scope (scope_hash)
+    `);
   }
 
   async getSchemaVersion(): Promise<number> {
@@ -179,6 +245,7 @@ export class MySQLRelationalAdapter implements RelationalAdapter {
       SELECT *
       FROM notes
       WHERE workspace = ? AND project = ? AND topic = ? AND subtopic = ?
+        AND deleted_at IS NULL
       LIMIT 1
     `,
       [workspace, project, topic, normalizedSubtopic]
@@ -195,6 +262,7 @@ export class MySQLRelationalAdapter implements RelationalAdapter {
       SELECT *
       FROM notes
       WHERE note_id = ?
+        AND deleted_at IS NULL
       LIMIT 1
     `,
       [noteId]
@@ -241,6 +309,7 @@ export class MySQLRelationalAdapter implements RelationalAdapter {
           subtopic = ?,
           review_status = ?
       WHERE note_id = ?
+        AND deleted_at IS NULL
     `,
       [topic, normalizedSubtopic, reviewStatus, noteId]
     )) as any;
@@ -262,11 +331,57 @@ export class MySQLRelationalAdapter implements RelationalAdapter {
     }
 
     // Foreign keys with ON DELETE CASCADE handle note_links
-    const [result] = (await this.pool.query('DELETE FROM notes WHERE note_id = ?', [
-      note.note_id,
-    ])) as any;
+    const [result] = (await this.pool.query(
+      `UPDATE notes
+       SET deleted_at = CURRENT_TIMESTAMP, deleted_by = ?
+       WHERE note_id = ? AND deleted_at IS NULL`,
+      [null, note.note_id]
+    )) as any;
 
     return result.affectedRows > 0;
+  }
+
+  async purgeNote(
+    workspace: string,
+    project: string,
+    topic: string,
+    subtopic?: string | null
+  ): Promise<boolean> {
+    const normalizedSubtopic = subtopic || '';
+    const [result] = (await this.pool.query(
+      `DELETE FROM notes
+       WHERE workspace = ? AND project = ? AND topic = ? AND subtopic = ?
+         AND deleted_at IS NOT NULL`,
+      [workspace, project, topic, normalizedSubtopic]
+    )) as any;
+    return result.affectedRows > 0;
+  }
+
+  async approveNote(noteId: number): Promise<Note | null> {
+    const [result] = (await this.pool.query(
+      `UPDATE notes
+       SET review_status = 'APPROVED'
+       WHERE note_id = ? AND deleted_at IS NULL`,
+      [noteId]
+    )) as any;
+    if (!result.affectedRows) return null;
+    return this.getNoteById(noteId);
+  }
+
+  async resolveAccount(tokenHash: string): Promise<Account | null> {
+    const [rows] = (await this.pool.query('SELECT resolve_account(?) AS account', [
+      tokenHash,
+    ])) as any;
+    const raw = rows[0]?.account;
+    if (!raw) return null;
+    const row = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!row || (row.role !== 'engineer' && row.role !== 'tech_lead')) return null;
+    return {
+      account_id: row.account_id,
+      name: row.name,
+      role: row.role,
+      workspaces: parseWorkspaces(row.workspaces),
+    };
   }
 
   async listTopics(
@@ -277,7 +392,7 @@ export class MySQLRelationalAdapter implements RelationalAdapter {
       `
       SELECT DISTINCT topic, subtopic
       FROM notes
-      WHERE workspace = ? AND project = ?
+      WHERE workspace = ? AND project = ? AND deleted_at IS NULL
       ORDER BY topic, subtopic
     `,
       [workspace, project]
@@ -369,6 +484,7 @@ export class MySQLRelationalAdapter implements RelationalAdapter {
       SELECT *
       FROM notes
       WHERE note_id IN (${placeholders})
+        AND deleted_at IS NULL
     `,
       noteIds
     )) as any;
@@ -387,7 +503,7 @@ export class MySQLRelationalAdapter implements RelationalAdapter {
     repoFingerprint?: string | null;
     repoUrl?: string | null;
   }): Promise<number[]> {
-    const conditions: string[] = [];
+    const conditions: string[] = ['deleted_at IS NULL'];
     const params: any[] = [];
 
     if (options.repoFingerprint) {

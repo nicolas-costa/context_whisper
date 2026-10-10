@@ -50,9 +50,58 @@ npm run dev
 
 ## Configuração de Banco de Dados
 
+Duas camadas distintas. Não misture as duas no `mcp.json`.
+
+### O que é responsabilidade da config do MCP
+
+A config do processo (variáveis de ambiente do cliente MCP, ou o shell que sobe o servidor) responde só isto:
+
+- **Para qual ambiente conectar** (`CONTEXT_WHISPER_ENV`, `--env`)
+- **Como conectar**: host, porta, database, usuário e senha da conta de banco dessa pessoa (ou, no mínimo, da conta do papel `engineer` / `tech_lead`), SSL, path do SQLite
+- **Onde estão os vetores**: `sqlite-vec`, `pgvector` ou Qdrant (`{ENV}_VECTOR_STORE` e variáveis do Qdrant)
+- **Quais workspaces esse ambiente aceita** (`{ENV}_WORKSPACE_WHITELIST`): roteamento de repositório, não papel de pessoa
+- **Quais ambientes o processo pode selecionar** (`CONTEXT_WHISPER_ALLOWED_ENVIRONMENTS`), quando quiser um teto além do whitelist
+
+O usuário e a senha dessa config são a conta de banco de quem sobe o processo.
+O ideal é uma conta por pessoa. O mínimo é uma conta por papel: o `mcp.json` de quem escreve usa `engineer`, o de quem aprova usa `tech_lead`.
+Engineer e tech-lead não podem compartilhar a mesma conta de banco. A sessão dos dois teria o mesmo `current_user`, e um trigger não consegue permitir `APPROVED` para um e recusar para o outro.
+
+O agente não envia role, usuário de banco nem token em tool call.
+
+`CONTEXT_WHISPER_ACCOUNT_TOKEN` identifica a pessoa. O processo `context-whisper` conecta com a conta de banco da config, calcula o hash do token e resolve a linha em `accounts` (função no banco, sem `SELECT` aberto em `token_hash`).
+Quem autoriza `APPROVED` é o papel da sessão no banco, não um campo do tool call. Com conta por pessoa, esse papel é o que a conta herda. Com conta por tipo, é o próprio `current_user`.
+O PostgreSQL e o MySQL não interpretam MCP. O Qdrant também não.
+
+### Recomendação de estrutura do banco corporativo
+
+Isto é responsabilidade de quem opera o PostgreSQL ou o MySQL da empresa.
+
+Um database (ou schema) por ambiente corporativo. Várias pessoas no mesmo banco. Uma linha por pessoa, não um banco por pessoa.
+
+| Objeto                | Função                                                                                                                                                                                                                                                                                                                                                              |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Conta por pessoa      | Modelo ideal. Cada um entra com a própria senha e herda o papel `engineer` ou `tech_lead`. Revogar uma pessoa não troca a senha das outras. O trigger vê o papel herdado, não o nome do usuário.                                                                                                                                                                    |
+| Conta por papel       | Mínimo aceitável. Uma conta `engineer` e uma `tech_lead`, compartilhadas por quem tem aquele papel. O trigger compara `current_user` com essas duas contas. Vazar um `mcp.json` entrega o papel inteiro.                                                                                                                                                            |
+| Login administrativo  | Fora do MCP. Cria accounts, troca role, revoga token.                                                                                                                                                                                                                                                                                                               |
+| `accounts`            | `id`, `name`, `token_hash`, `role` (`engineer` \| `tech_lead`), workspaces permitidos, `revoked_at`. O lookup do token passa por uma função que devolve a linha correspondente, sem conceder `SELECT` na coluna do hash.                                                                                                                                            |
+| `notes.review_status` | `DRAFT` ou `APPROVED`. Trigger recusa `APPROVED` para sessão cujo papel é `engineer` (papel herdado, ou `current_user = engineer` no modelo de conta por tipo). Sem `UPDATE` nessa coluna para quem escreve. O MCP também recusa a tool `approve_note`, para o agente receber o erro no tool call. A trava do bypass via SQL é o trigger (ou um `GRANT` de coluna). |
+| Soft-delete           | `deleted_at` / `deleted_by`. A nota some da busca e o vetor sai do índice. A linha fica para auditoria. Purge é operação à parte, privilegiada.                                                                                                                                                                                                                     |
+| Unicidade             | O escopo `(workspace, project, topic, subtopic)` é único entre notas vivas. Nota apagada não bloqueia recriar o mesmo tópico. No MySQL o índice único cabe numa coluna gerada (`NULL` quando `deleted_at` está preenchido), porque um índice das quatro colunas em `utf8mb4` estoura o limite do InnoDB.                                                            |
+
+`engineer` escreve e mantém rascunho. `tech_lead` aprova. Os dois papéis apontam para o mesmo host e o mesmo database. Nenhum dos dois escreve em `accounts` / `roles` nem lê `token_hash`. A senha no `mcp.json` escolhe a conta (a pessoa, ou o papel). O token identifica a pessoa para o MCP.
+
+Busca corporativa deve ignorar nota apagada e, por default, rascunho. Draft só com filtro explícito. 
+Hoje a busca inclui os dois, salvo se o caller passar `review_status`.
+
+Qdrant, quando usado, guarda vetor. A nota relacional é a fonte. Apagar ou ocultar a nota tem que tirar o ponto do Qdrant. 
+O vector store não é o cadastro de pessoas nem de roles.
+
+SSL termina no servidor do banco. A config do MCP só liga `PG_SSL` / `MYSQL_SSL` e, se preciso, desliga a validação do certificado em dev.
+
 ### SQLite + sqlite-vec (Default)
 
 Sem configuração necessária. O banco é criado automaticamente em:
+
 - **Linux**: `~/.local/share/context-whisper/meta.sqlite`
 - **macOS**: `~/Library/Application Support/context-whisper/meta.sqlite`
 - **Windows**: `%AppData%/context-whisper/meta.sqlite`
@@ -80,10 +129,12 @@ export LOCAL_SQLITE_PATH=/home/dev/notes.sqlite
 # Cliente que usa PostgreSQL com pgvector
 export ACME_CORP_PG_HOST=db.acme-corp.internal
 export ACME_CORP_PG_PORT=5432
-export ACME_CORP_PG_USER=whisper_user
+export ACME_CORP_PG_USER=engineer
 export ACME_CORP_PG_PASSWORD=secret123
 export ACME_CORP_PG_DATABASE=context_whisper
 export ACME_CORP_PG_SSL=true  # opcional
+# Workspaces (owners de repo) que este ambiente aceita. Não é role de pessoa.
+export ACME_CORP_WORKSPACE_WHITELIST=acme-corp
 
 # Ativar esse ambiente por padrão
 export CONTEXT_WHISPER_ENV=ACME_CORP
@@ -92,6 +143,7 @@ export CONTEXT_WHISPER_ENV=ACME_CORP
 #### Qualquer Banco + Qdrant (Vector Store Externo)
 
 Você pode usar **qualquer banco relacional** (MySQL, PostgreSQL, SQLite) com **Qdrant** como vector store externo. Útil quando:
+
 - MySQL (não tem vetores nativos)
 - PostgreSQL sem permissão para instalar pgvector
 - Prefere Qdrant Cloud gerenciado
@@ -176,24 +228,27 @@ CONTEXT_WHISPER_ENV=BIGCLIENT context-whisper
       "args": ["context-whisper"],
       "env": {
         "LOCAL_SQLITE_PATH": "/home/user/.local/share/context-whisper/local.sqlite",
-        
+
         "ACME_CORP_PG_HOST": "db.acme-corp.internal",
         "ACME_CORP_PG_USER": "whisper",
         "ACME_CORP_PG_PASSWORD": "secret",
         "ACME_CORP_PG_DATABASE": "context_whisper",
-        
+        "ACME_CORP_WORKSPACE_WHITELIST": "acme-corp",
+
         "STARTUP_XYZ_MYSQL_HOST": "mysql.startup-xyz.com",
         "STARTUP_XYZ_MYSQL_USER": "app",
         "STARTUP_XYZ_MYSQL_PASSWORD": "pass",
         "STARTUP_XYZ_MYSQL_DATABASE": "tech_notes",
         "STARTUP_XYZ_QDRANT_HOST": "qdrant.startup-xyz.com",
-        
+
         "CONTEXT_WHISPER_ENV": "LOCAL"
       }
     }
   }
 }
 ```
+
+A senha nesse JSON é a conta de banco da pessoa ou, no mínimo, a do papel (`engineer` ou `tech_lead`). Não é uma conta compartilhada pelos dois papéis. O token da pessoa é outro segredo. Role não vai em campo de tool. Veja a seção de banco corporativo acima.
 
 ## Instalação do sqlite-vec (Para SQLite)
 
@@ -212,6 +267,7 @@ O binário correto para sua plataforma será instalado automaticamente.
 Cria ou atualiza uma nota técnica vetorizada.
 
 **Payload:**
+
 ```json
 {
   "repo_url": "https://github.com/workspace/project",
@@ -238,6 +294,7 @@ Cria ou atualiza uma nota técnica vetorizada.
 Recupera uma nota específica do repositório.
 
 **Payload:**
+
 ```json
 {
   "repo_url": "https://github.com/workspace/project",
@@ -251,6 +308,7 @@ Recupera uma nota específica do repositório.
 Busca notas usando similaridade semântica vetorial.
 
 **Payload:**
+
 ```json
 {
   "environment": "LOCAL",

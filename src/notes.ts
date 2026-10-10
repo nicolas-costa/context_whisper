@@ -1,6 +1,13 @@
 import type { DatabaseAdapter, Note, NoteLink, SearchResult } from './db.js';
+import type { Account } from './db/adapters/interface.js';
 import * as embeds from './embeds.js';
 import { detectContext, type DetectedContext } from './context-detector.js';
+import {
+  assertAccountWorkspace,
+  assertCanApprove,
+  assertCanPurge,
+  reviewStatusForUpsert,
+} from './accounts.js';
 
 export interface UpsertNoteParams {
   workspace?: string;
@@ -137,7 +144,8 @@ function parseCodeLinksFromMarkdown(bodyMd: string): Array<Partial<NoteLink>> {
 export async function upsertNote(
   adapter: DatabaseAdapter,
   params: UpsertNoteParams,
-  cwd?: string
+  cwd?: string,
+  account?: Account | null
 ): Promise<UpsertNoteResult> {
   const context = detectContext(
     {
@@ -147,6 +155,9 @@ export async function upsertNote(
     },
     cwd
   );
+
+  assertAccountWorkspace(account ?? null, context.workspace);
+  const reviewStatus = reviewStatusForUpsert(account ?? null, params.review_status);
 
   const tagsJson = params.tags && params.tags.length > 0 ? JSON.stringify(params.tags) : null;
 
@@ -163,8 +174,8 @@ export async function upsertNote(
     subtopic: params.subtopic || null,
     tagsJson,
     bodyMd: params.body_md,
-    createdBy: params.created_by || null,
-    reviewStatus: params.review_status || 'DRAFT',
+    createdBy: account?.name || params.created_by || null,
+    reviewStatus,
     repoUrl: context.repo_url ?? undefined,
     repoFingerprint: context.repo_fingerprint ?? undefined,
     repoProvider: context.repo_provider ?? undefined,
@@ -231,7 +242,8 @@ export async function getNote(
 export async function searchNotes(
   adapter: DatabaseAdapter,
   params: SearchNotesParams,
-  cwd?: string
+  cwd?: string,
+  account?: Account | null
 ): Promise<SearchNotesResult> {
   const context = detectContext(
     {
@@ -254,7 +266,7 @@ export async function searchNotes(
     project,
     topK: params.top_k || 5,
     tags: params.tags || null,
-    reviewStatus: params.review_status || null,
+    reviewStatus: params.review_status ?? (account ? 'APPROVED' : null),
     repoFingerprint,
     repoUrl,
   });
@@ -296,7 +308,8 @@ export async function listTopics(
 export async function deleteNote(
   adapter: DatabaseAdapter,
   params: DeleteNoteParams,
-  cwd?: string
+  cwd?: string,
+  account?: Account | null
 ): Promise<DeleteNoteResult> {
   const context = detectContext(
     {
@@ -305,6 +318,8 @@ export async function deleteNote(
     },
     cwd
   );
+
+  assertAccountWorkspace(account ?? null, context.workspace);
 
   // Fetch note first so we can delete vectors even when vectors live outside the relational DB (e.g., Qdrant).
   const existing = await adapter.relational.getNote(
@@ -405,8 +420,12 @@ export async function deleteNote(
 export async function updateNoteMeta(
   adapter: DatabaseAdapter,
   params: UpdateNoteMetaParams,
-  cwd?: string
+  cwd?: string,
+  account?: Account | null
 ): Promise<UpdateNoteMetaResult> {
+  if (params.review_status === 'APPROVED') {
+    assertCanApprove(account ?? null);
+  }
   const existing = await adapter.relational.getNoteById(params.note_id);
   if (!existing) {
     const context = detectContext(
@@ -418,6 +437,8 @@ export async function updateNoteMeta(
     );
     return { note: null, context };
   }
+
+  assertAccountWorkspace(account ?? null, existing.workspace);
 
   if (params.workspace && existing.workspace !== params.workspace) {
     const context = detectContext(
@@ -459,4 +480,54 @@ export async function updateNoteMeta(
   );
 
   return { note: updated, context };
+}
+
+export async function approveNote(
+  adapter: DatabaseAdapter,
+  params: DeleteNoteParams,
+  cwd?: string,
+  account?: Account | null
+): Promise<{ note: Note | null; context: DetectedContext }> {
+  assertCanApprove(account ?? null);
+  const context = detectContext(
+    {
+      workspace: params.workspace,
+      project: params.project,
+    },
+    cwd
+  );
+  assertAccountWorkspace(account ?? null, context.workspace);
+  const existing = await adapter.relational.getNote(
+    context.workspace,
+    context.project,
+    params.topic,
+    params.subtopic
+  );
+  if (!existing) return { note: null, context };
+  const note = await adapter.relational.approveNote(existing.note_id);
+  return { note, context };
+}
+
+export async function purgeNote(
+  adapter: DatabaseAdapter,
+  params: DeleteNoteParams,
+  cwd?: string,
+  account?: Account | null
+): Promise<DeleteNoteResult> {
+  assertCanPurge(account ?? null);
+  const context = detectContext(
+    {
+      workspace: params.workspace,
+      project: params.project,
+    },
+    cwd
+  );
+  assertAccountWorkspace(account ?? null, context.workspace);
+  const deleted = await adapter.relational.purgeNote(
+    context.workspace,
+    context.project,
+    params.topic,
+    params.subtopic
+  );
+  return { deleted, context };
 }

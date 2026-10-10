@@ -8,10 +8,13 @@ import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { redactSecrets, truncate } from '../../security.js';
+import { stripLeadingSqlComments } from '../sql-script.js';
+import { applyMigrations } from '../migrate.js';
 import type {
   RelationalAdapter,
   VectorAdapter,
   DatabaseAdapter,
+  Account,
   Note,
   NoteLink,
   SearchResult,
@@ -22,6 +25,15 @@ const { Pool } = pg;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+function parseWorkspaces(raw: string | null): string[] | null {
+  if (!raw) return null;
+  const items = raw
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return items.length > 0 ? items : null;
+}
 
 function escapeLike(input: string): string {
   // Escape LIKE wildcards and escape char for Postgres patterns.
@@ -59,8 +71,8 @@ export class PostgresRelationalAdapter implements RelationalAdapter {
     const statements = this.splitPostgresStatements(schema);
 
     for (const statement of statements) {
-      const trimmed = statement.trim();
-      if (!trimmed || trimmed.startsWith('--')) continue;
+      const trimmed = stripLeadingSqlComments(statement);
+      if (!trimmed) continue;
 
       // Skip vector table - handled by vector adapter
       if (trimmed.includes('CREATE TABLE') && trimmed.includes('note_vectors')) {
@@ -85,6 +97,20 @@ export class PostgresRelationalAdapter implements RelationalAdapter {
         throw error;
       }
     }
+
+    await applyMigrations({
+      dir: join(__dirname, '..', '..', '..', 'sql', 'postgres', 'migrations'),
+      currentVersion: await this.getSchemaVersion(),
+      execute: async (sql) => {
+        await this.pool.query(sql);
+      },
+      recordVersion: async (version) => {
+        await this.pool.query(
+          'INSERT INTO schema_version (version) VALUES ($1) ON CONFLICT (version) DO NOTHING',
+          [version]
+        );
+      },
+    });
   }
 
   private splitPostgresStatements(sql: string): string[] {
@@ -169,7 +195,7 @@ export class PostgresRelationalAdapter implements RelationalAdapter {
       INSERT INTO notes (workspace, project, topic, subtopic, tags_json, body_md, created_by, review_status,
                          repo_url, repo_fingerprint, repo_provider, repo_owner, repo_name)
       VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, 'DRAFT'), $9, $10, $11, $12, $13)
-      ON CONFLICT(workspace, project, topic, subtopic)
+      ON CONFLICT(workspace, project, topic, subtopic) WHERE deleted_at IS NULL
       DO UPDATE SET
         tags_json=EXCLUDED.tags_json,
         body_md=EXCLUDED.body_md,
@@ -216,6 +242,7 @@ export class PostgresRelationalAdapter implements RelationalAdapter {
       SELECT *
       FROM notes
       WHERE workspace = $1 AND project = $2 AND topic = $3 AND subtopic = $4
+        AND deleted_at IS NULL
       LIMIT 1
     `,
       [workspace, project, topic, normalizedSubtopic]
@@ -233,6 +260,7 @@ export class PostgresRelationalAdapter implements RelationalAdapter {
       SELECT *
       FROM notes
       WHERE note_id = $1
+        AND deleted_at IS NULL
       LIMIT 1
     `,
       [noteId]
@@ -280,6 +308,7 @@ export class PostgresRelationalAdapter implements RelationalAdapter {
           review_status = $3,
           updated_at = CURRENT_TIMESTAMP
       WHERE note_id = $4
+        AND deleted_at IS NULL
       RETURNING *
     `,
       [topic, normalizedSubtopic, reviewStatus, noteId]
@@ -301,10 +330,54 @@ export class PostgresRelationalAdapter implements RelationalAdapter {
       return false;
     }
 
-    // Delete cascade handles note_links and note_vectors
-    const result = await this.pool.query('DELETE FROM notes WHERE note_id = $1', [note.note_id]);
+    const result = await this.pool.query(
+      `UPDATE notes
+       SET deleted_at = CURRENT_TIMESTAMP, deleted_by = $2, updated_at = CURRENT_TIMESTAMP
+       WHERE note_id = $1 AND deleted_at IS NULL`,
+      [note.note_id, null]
+    );
 
     return result.rowCount !== null && result.rowCount > 0;
+  }
+
+  async purgeNote(
+    workspace: string,
+    project: string,
+    topic: string,
+    subtopic?: string | null
+  ): Promise<boolean> {
+    const normalizedSubtopic = subtopic || '';
+    const result = await this.pool.query(
+      `DELETE FROM notes
+       WHERE workspace = $1 AND project = $2 AND topic = $3 AND subtopic = $4
+         AND deleted_at IS NOT NULL`,
+      [workspace, project, topic, normalizedSubtopic]
+    );
+    return result.rowCount !== null && result.rowCount > 0;
+  }
+
+  async approveNote(noteId: number): Promise<Note | null> {
+    const result = await this.pool.query(
+      `UPDATE notes
+       SET review_status = 'APPROVED', updated_at = CURRENT_TIMESTAMP
+       WHERE note_id = $1 AND deleted_at IS NULL
+       RETURNING *`,
+      [noteId]
+    );
+    if (result.rows.length === 0) return null;
+    return this.mapRowToNote(result.rows[0]);
+  }
+
+  async resolveAccount(tokenHash: string): Promise<Account | null> {
+    const result = await this.pool.query(`SELECT * FROM resolve_account($1)`, [tokenHash]);
+    const row = result.rows[0];
+    if (!row || (row.role !== 'engineer' && row.role !== 'tech_lead')) return null;
+    return {
+      account_id: row.account_id,
+      name: row.name,
+      role: row.role,
+      workspaces: parseWorkspaces(row.workspaces),
+    };
   }
 
   async listTopics(
@@ -315,7 +388,7 @@ export class PostgresRelationalAdapter implements RelationalAdapter {
       `
       SELECT DISTINCT topic, subtopic
       FROM notes
-      WHERE workspace = $1 AND project = $2
+      WHERE workspace = $1 AND project = $2 AND deleted_at IS NULL
       ORDER BY topic, subtopic
     `,
       [workspace, project]
@@ -394,6 +467,68 @@ export class PostgresRelationalAdapter implements RelationalAdapter {
    */
   getPool(): pg.Pool {
     return this.pool;
+  }
+
+  async getNotesByIds(noteIds: number[]): Promise<Note[]> {
+    if (noteIds.length === 0) return [];
+    const result = await this.pool.query(
+      `SELECT * FROM notes WHERE note_id = ANY($1) AND deleted_at IS NULL`,
+      [noteIds]
+    );
+    return result.rows.map((row: any) => this.mapRowToNote(row));
+  }
+
+  /**
+   * Note ids matching relational filters. Required by QdrantCombinedAdapter;
+   * without it, vector search ignores workspace/project and leaks other tenants.
+   */
+  async getFilteredNoteIds(options: {
+    workspace?: string | null;
+    project?: string | null;
+    tags?: string[] | null;
+    reviewStatus?: string | null;
+    repoFingerprint?: string | null;
+    repoUrl?: string | null;
+  }): Promise<number[]> {
+    const conditions: string[] = ['deleted_at IS NULL'];
+    const params: unknown[] = [];
+    let paramIndex = 1;
+
+    if (options.repoFingerprint) {
+      conditions.push(`repo_fingerprint = $${paramIndex++}`);
+      params.push(options.repoFingerprint);
+    } else if (options.repoUrl) {
+      conditions.push(`repo_url = $${paramIndex++}`);
+      params.push(options.repoUrl);
+    }
+
+    if (options.workspace) {
+      conditions.push(`workspace = $${paramIndex++}`);
+      params.push(options.workspace);
+    }
+
+    if (options.project) {
+      conditions.push(`project = $${paramIndex++}`);
+      params.push(options.project);
+    }
+
+    if (options.tags && options.tags.length > 0) {
+      const tagConditions: string[] = [];
+      for (const tag of options.tags) {
+        tagConditions.push(`tags_json LIKE $${paramIndex++} ESCAPE E'\\\\'`);
+        params.push(`%"${escapeLike(tag)}"%`);
+      }
+      conditions.push(`(${tagConditions.join(' OR ')})`);
+    }
+
+    if (options.reviewStatus) {
+      conditions.push(`review_status = $${paramIndex++}`);
+      params.push(options.reviewStatus);
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const result = await this.pool.query(`SELECT note_id FROM notes ${whereClause}`, params);
+    return result.rows.map((row: any) => row.note_id);
   }
 }
 
@@ -570,7 +705,7 @@ export class PostgresDatabaseAdapter implements DatabaseAdapter {
     const topK = options.topK || 5;
 
     // Build WHERE conditions
-    const conditions: string[] = [];
+    const conditions: string[] = ['n.deleted_at IS NULL'];
     const params: any[] = [vectorStr];
     let paramIndex = 2;
 

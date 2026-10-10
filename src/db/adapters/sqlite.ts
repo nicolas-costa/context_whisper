@@ -4,13 +4,16 @@
  */
 
 import Database from 'better-sqlite3';
-import { readFileSync, existsSync } from 'fs';
+import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { stripLeadingSqlComments } from '../sql-script.js';
+import { applyMigrations } from '../migrate.js';
 import type {
   RelationalAdapter,
   VectorAdapter,
   DatabaseAdapter,
+  Account,
   Note,
   NoteLink,
   SearchResult,
@@ -19,6 +22,23 @@ import type {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+const MAX_KNN_CANDIDATES = 1024;
+
+function nextKnnLimit(current: number, total: number): number | null {
+  if (current >= total || current >= MAX_KNN_CANDIDATES) return null;
+  const next = Math.min(current * 2, total, MAX_KNN_CANDIDATES);
+  if (next <= current) return null;
+  return next;
+}
+
+function parseWorkspaces(raw: string | null): string[] | null {
+  if (!raw) return null;
+  const items = raw
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return items.length > 0 ? items : null;
+}
 
 function escapeLike(input: string): string {
   // Escape LIKE wildcards and escape char for SQLite patterns.
@@ -54,8 +74,8 @@ export class SQLiteRelationalAdapter implements RelationalAdapter {
     // Split schema into statements and execute individually
     const statements = schema
       .split(';')
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0 && !s.startsWith('--'));
+      .map((s) => stripLeadingSqlComments(s))
+      .filter((s) => s.length > 0);
 
     for (const statement of statements) {
       try {
@@ -73,6 +93,17 @@ export class SQLiteRelationalAdapter implements RelationalAdapter {
         throw error;
       }
     }
+
+    await applyMigrations({
+      dir: join(__dirname, '..', '..', '..', 'sql', 'sqlite', 'migrations'),
+      currentVersion: await this.getSchemaVersion(),
+      execute: async (sql) => {
+        this.db.exec(sql);
+      },
+      recordVersion: async (version) => {
+        this.db.prepare('INSERT INTO schema_version (version) VALUES (?)').run(version);
+      },
+    });
   }
 
   async getSchemaVersion(): Promise<number> {
@@ -112,7 +143,7 @@ export class SQLiteRelationalAdapter implements RelationalAdapter {
                          repo_url, repo_fingerprint, repo_provider, repo_owner, repo_name)
       VALUES (:workspace, :project, :topic, :subtopic, :tags_json, :body_md, :created_by, COALESCE(:review_status, 'DRAFT'),
               :repo_url, :repo_fingerprint, :repo_provider, :repo_owner, :repo_name)
-      ON CONFLICT(workspace, project, topic, subtopic)
+      ON CONFLICT(workspace, project, topic, subtopic) WHERE deleted_at IS NULL
       DO UPDATE SET
         tags_json=excluded.tags_json,
         body_md=excluded.body_md,
@@ -174,6 +205,7 @@ export class SQLiteRelationalAdapter implements RelationalAdapter {
       SELECT *
       FROM notes
       WHERE workspace=:ws AND project=:project AND topic=:topic AND subtopic=:subtopic
+        AND deleted_at IS NULL
       LIMIT 1
     `);
 
@@ -192,6 +224,7 @@ export class SQLiteRelationalAdapter implements RelationalAdapter {
       SELECT *
       FROM notes
       WHERE note_id = ?
+        AND deleted_at IS NULL
       LIMIT 1
     `);
 
@@ -213,7 +246,7 @@ export class SQLiteRelationalAdapter implements RelationalAdapter {
           subtopic = :subtopic,
           review_status = :review_status,
           updated_at = datetime('now')
-      WHERE note_id = :note_id
+      WHERE note_id = :note_id AND deleted_at IS NULL
     `);
 
     const result = stmt.run({
@@ -241,14 +274,77 @@ export class SQLiteRelationalAdapter implements RelationalAdapter {
 
     const intNoteId = Math.floor(Number(note.note_id));
 
-    const transaction = this.db.transaction(() => {
-      this.db.prepare('DELETE FROM note_links WHERE note_id = ?').run(intNoteId);
-      this.db.prepare('DELETE FROM note_vectors WHERE note_id = ?').run(intNoteId);
-      this.db.prepare('DELETE FROM notes WHERE note_id = ?').run(intNoteId);
-    });
+    const result = this.db
+      .prepare(
+        `UPDATE notes
+         SET deleted_at = datetime('now'), deleted_by = :deleted_by, updated_at = datetime('now')
+         WHERE note_id = :note_id AND deleted_at IS NULL`
+      )
+      .run({ note_id: intNoteId, deleted_by: null });
+    return result.changes > 0;
+  }
 
-    transaction();
+  async purgeNote(
+    workspace: string,
+    project: string,
+    topic: string,
+    subtopic?: string | null
+  ): Promise<boolean> {
+    const normalizedSubtopic = subtopic || '';
+    const row = this.db
+      .prepare(
+        `SELECT note_id FROM notes
+         WHERE workspace = ? AND project = ? AND topic = ? AND subtopic = ? AND deleted_at IS NOT NULL`
+      )
+      .get(workspace, project, topic, normalizedSubtopic) as { note_id: number } | undefined;
+    if (!row) return false;
+    const noteId = Math.floor(Number(row.note_id));
+    const tx = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM note_links WHERE note_id = ?').run(noteId);
+      const hasVectorTable = this.db
+        .prepare(
+          `SELECT 1 AS ok FROM sqlite_master WHERE name = 'note_vectors' AND type IN ('table', 'view')`
+        )
+        .get();
+      if (hasVectorTable) {
+        this.db.prepare('DELETE FROM note_vectors WHERE note_id = ?').run(noteId);
+      }
+      this.db.prepare('DELETE FROM notes WHERE note_id = ?').run(noteId);
+    });
+    tx();
     return true;
+  }
+
+  async approveNote(noteId: number): Promise<Note | null> {
+    const result = this.db
+      .prepare(
+        `UPDATE notes
+         SET review_status = 'APPROVED', updated_at = datetime('now')
+         WHERE note_id = ? AND deleted_at IS NULL`
+      )
+      .run(noteId);
+    if (!result.changes) return null;
+    return this.getNoteById(noteId);
+  }
+
+  async resolveAccount(tokenHash: string): Promise<Account | null> {
+    const row = this.db
+      .prepare(
+        `SELECT account_id, name, role, workspaces
+         FROM accounts
+         WHERE token_hash = ? AND revoked_at IS NULL`
+      )
+      .get(tokenHash) as
+      | { account_id: number; name: string; role: string; workspaces: string | null }
+      | undefined;
+    if (!row) return null;
+    if (row.role !== 'engineer' && row.role !== 'tech_lead') return null;
+    return {
+      account_id: row.account_id,
+      name: row.name,
+      role: row.role,
+      workspaces: parseWorkspaces(row.workspaces),
+    };
   }
 
   async listTopics(
@@ -258,7 +354,7 @@ export class SQLiteRelationalAdapter implements RelationalAdapter {
     const stmt = this.db.prepare(`
       SELECT DISTINCT topic, subtopic
       FROM notes
-      WHERE workspace=:ws AND project=:project
+      WHERE workspace=:ws AND project=:project AND deleted_at IS NULL
       ORDER BY topic, subtopic
     `);
 
@@ -324,6 +420,68 @@ export class SQLiteRelationalAdapter implements RelationalAdapter {
       repo_fingerprint: repoFingerprint,
       local_path: localPath,
     });
+  }
+
+  async getNotesByIds(noteIds: number[]): Promise<Note[]> {
+    if (noteIds.length === 0) return [];
+    const placeholders = noteIds.map(() => '?').join(',');
+    const stmt = this.db.prepare(
+      `SELECT * FROM notes WHERE note_id IN (${placeholders}) AND deleted_at IS NULL`
+    );
+    return stmt.all(...noteIds) as Note[];
+  }
+
+  /**
+   * Note ids matching relational filters. Required by QdrantCombinedAdapter;
+   * without it, vector search ignores workspace/project and leaks other tenants.
+   */
+  getFilteredNoteIds(options: {
+    workspace?: string | null;
+    project?: string | null;
+    tags?: string[] | null;
+    reviewStatus?: string | null;
+    repoFingerprint?: string | null;
+    repoUrl?: string | null;
+  }): number[] {
+    const conditions: string[] = ['deleted_at IS NULL'];
+    const params: unknown[] = [];
+
+    if (options.repoFingerprint) {
+      conditions.push('repo_fingerprint = ?');
+      params.push(options.repoFingerprint);
+    } else if (options.repoUrl) {
+      conditions.push('repo_url = ?');
+      params.push(options.repoUrl);
+    }
+
+    if (options.workspace) {
+      conditions.push('workspace = ?');
+      params.push(options.workspace);
+    }
+
+    if (options.project) {
+      conditions.push('project = ?');
+      params.push(options.project);
+    }
+
+    if (options.tags && options.tags.length > 0) {
+      const tagConditions: string[] = [];
+      for (const tag of options.tags) {
+        tagConditions.push(`json_extract(tags_json, '$') LIKE ? ESCAPE '\\'`);
+        params.push(`%"${escapeLike(tag)}"%`);
+      }
+      conditions.push(`(${tagConditions.join(' OR ')})`);
+    }
+
+    if (options.reviewStatus) {
+      conditions.push('review_status = ?');
+      params.push(options.reviewStatus);
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const stmt = this.db.prepare(`SELECT note_id FROM notes ${whereClause}`);
+    const rows = stmt.all(...params) as Array<{ note_id: number }>;
+    return rows.map((r) => r.note_id);
   }
 
   /**
@@ -443,30 +601,42 @@ export class SQLiteVectorAdapter implements VectorAdapter {
     filter?: { noteIds?: number[] }
   ): Promise<Array<{ noteId: number; distance: number }>> {
     const buffer = Buffer.from(queryVector.buffer, queryVector.byteOffset, queryVector.byteLength);
+    const noteIdSet = filter?.noteIds && filter.noteIds.length > 0 ? new Set(filter.noteIds) : null;
 
-    // sqlite-vec KNN query: must have 'k = ?' constraint
-    let query = `
+    const totalRow = this.db.prepare('SELECT COUNT(*) AS c FROM note_vectors').get() as
+      | { c: number }
+      | undefined;
+    const total = Number(totalRow?.c ?? 0);
+    if (total === 0 || topK <= 0) return [];
+
+    const stmt = this.db.prepare(`
       SELECT note_id, distance
       FROM note_vectors
       WHERE embedding MATCH ? AND k = ?
-    `;
+    `);
 
-    const stmt = this.db.prepare(query);
-    // Request more results to account for post-filtering
-    const fetchLimit = filter?.noteIds ? Math.min(topK * 3, 100) : topK;
-    const results = stmt.all(buffer, fetchLimit) as Array<{ note_id: number; distance: number }>;
-
-    // Apply noteIds filter if provided (for post-filtering after relational query)
-    let filteredResults = results;
-    if (filter?.noteIds && filter.noteIds.length > 0) {
-      const noteIdSet = new Set(filter.noteIds);
-      filteredResults = results.filter((r) => noteIdSet.has(r.note_id));
+    // sqlite-vec applies k before any note_id predicate. Widen k until the
+    // post-filter still yields topK, or the table is exhausted.
+    let k = Math.min(topK, total);
+    let rows: Array<{ note_id: number; distance: number }> = [];
+    for (; ;) {
+      rows = stmt.all(buffer, k) as Array<{ note_id: number; distance: number }>;
+      const filtered = noteIdSet ? rows.filter((r) => noteIdSet.has(r.note_id)) : rows;
+      if (!noteIdSet || filtered.length >= topK || k >= total) {
+        return filtered.slice(0, topK).map((r) => ({
+          noteId: r.note_id,
+          distance: r.distance,
+        }));
+      }
+      const next = nextKnnLimit(k, total);
+      if (next === null) {
+        return filtered.slice(0, topK).map((r) => ({
+          noteId: r.note_id,
+          distance: r.distance,
+        }));
+      }
+      k = next;
     }
-
-    return filteredResults.map((r) => ({
-      noteId: r.note_id,
-      distance: r.distance,
-    }));
   }
 }
 
@@ -518,7 +688,7 @@ export class SQLiteDatabaseAdapter implements DatabaseAdapter {
     const topK = options.topK || 5;
 
     // Build WHERE conditions for notes table
-    const noteConditions: string[] = [];
+    const noteConditions: string[] = ['n.deleted_at IS NULL'];
     const params: any[] = [];
 
     if (options.repoFingerprint) {
@@ -555,8 +725,8 @@ export class SQLiteDatabaseAdapter implements DatabaseAdapter {
     }
 
     const whereClause = noteConditions.length > 0 ? `WHERE ${noteConditions.join(' AND ')}` : '';
+    const hasFilter = noteConditions.length > 0;
 
-    // Combined query with vector search subquery
     const query = `
       SELECT
         n.note_id, n.workspace, n.project, n.topic, n.subtopic,
@@ -574,12 +744,26 @@ export class SQLiteDatabaseAdapter implements DatabaseAdapter {
       ORDER BY v.distance
     `;
 
-    const finalParams: any[] = [buffer, topK, ...params];
-
     const stmt = this.db.prepare(query);
-    const results = stmt.all(...finalParams) as SearchResult[];
+    if (!hasFilter) {
+      return stmt.all(buffer, topK, ...params) as SearchResult[];
+    }
 
-    return results;
+    const totalRow = this.db.prepare('SELECT COUNT(*) AS c FROM note_vectors').get() as
+      | { c: number }
+      | undefined;
+    const total = Number(totalRow?.c ?? 0);
+    if (total === 0) return [];
+
+    let k = Math.min(topK, total);
+    let results: SearchResult[] = [];
+    for (; ;) {
+      results = stmt.all(buffer, k, ...params) as SearchResult[];
+      if (results.length >= topK || k >= total) return results.slice(0, topK);
+      const next = nextKnnLimit(k, total);
+      if (next === null) return results.slice(0, topK);
+      k = next;
+    }
   }
 }
 
@@ -592,43 +776,49 @@ export function openSQLiteDatabase(
 ): { db: Database.Database; adapter: SQLiteDatabaseAdapter } {
   const db = new Database(config.path);
 
-  // Configure SQLite pragmas
-  db.pragma('journal_mode = WAL');
-  db.pragma('synchronous = NORMAL');
-
-  // Load sqlite-vec extension
-  if (!config.vecLibPath) {
-    throw new Error('sqlite-vec extension not found. Vector search is REQUIRED for RAG.');
-  }
-
   try {
-    db.loadExtension(config.vecLibPath);
-    // Verify extension is loaded
-    try {
-      db.exec(
-        'CREATE VIRTUAL TABLE IF NOT EXISTS _vec_init_test USING vec0(id INTEGER PRIMARY KEY, embedding FLOAT[384])'
-      );
-      db.exec('DROP TABLE IF EXISTS _vec_init_test');
-    } catch (verifyError) {
-      const verifyMsg = verifyError instanceof Error ? verifyError.message : String(verifyError);
-      if (
-        verifyMsg.includes('no such module') &&
-        (verifyMsg.includes('vec0') || verifyMsg.includes('cev0'))
-      ) {
-        throw new Error(
-          `sqlite-vec extension loaded but vec0 module not available. Path: ${config.vecLibPath}`
-        );
-      }
+    db.pragma('journal_mode = WAL');
+    db.pragma('synchronous = NORMAL');
+
+    if (!config.vecLibPath) {
+      throw new Error('sqlite-vec extension not found. Vector search is REQUIRED for RAG.');
     }
+
+    try {
+      db.loadExtension(config.vecLibPath);
+      try {
+        db.exec(
+          'CREATE VIRTUAL TABLE IF NOT EXISTS _vec_init_test USING vec0(id INTEGER PRIMARY KEY, embedding FLOAT[384])'
+        );
+        db.exec('DROP TABLE IF EXISTS _vec_init_test');
+      } catch (verifyError) {
+        const verifyMsg = verifyError instanceof Error ? verifyError.message : String(verifyError);
+        if (
+          verifyMsg.includes('no such module') &&
+          (verifyMsg.includes('vec0') || verifyMsg.includes('cev0'))
+        ) {
+          throw new Error(
+            `sqlite-vec extension loaded but vec0 module not available. Path: ${config.vecLibPath}`
+          );
+        }
+      }
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error(
+        `[context-whisper] ERROR: Failed to load sqlite-vec extension from ${config.vecLibPath}:`,
+        errorMsg
+      );
+      throw error;
+    }
+
+    const adapter = new SQLiteDatabaseAdapter(db, environmentName);
+    return { db, adapter };
   } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    console.error(
-      `[context-whisper] ERROR: Failed to load sqlite-vec extension from ${config.vecLibPath}:`,
-      errorMsg
-    );
+    try {
+      db.close();
+    } catch {
+      // The original error is the one that matters.
+    }
     throw error;
   }
-
-  const adapter = new SQLiteDatabaseAdapter(db, environmentName);
-  return { db, adapter };
 }

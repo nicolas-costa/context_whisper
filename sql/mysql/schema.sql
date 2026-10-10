@@ -29,7 +29,14 @@ CREATE TABLE IF NOT EXISTS notes (
   
   created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  UNIQUE KEY uq_notes_scope (workspace(100), project(100), topic(200), subtopic(200))
+  -- Full-column uniqueness. A prefix index (workspace(100), topic(200), ...)
+  -- treats distinct notes as the same row and ON DUPLICATE KEY UPDATE overwrites them.
+  -- utf8mb4 makes a 4-column index of the raw VARCHAR widths exceed InnoDB's 3072-byte limit.
+  scope_hash    CHAR(64)
+    GENERATED ALWAYS AS (
+      SHA2(CONCAT_WS(UNHEX('1F'), workspace, project, topic, subtopic), 256)
+    ) STORED,
+  UNIQUE KEY uq_notes_scope (scope_hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 /* Links for code traceability */
