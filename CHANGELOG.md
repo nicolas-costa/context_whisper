@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [1.4.0] - 2026-01-07
 
+### Breaking
+- **Workspace whitelist is required.** The implicit SQLite environment refuses to start unless `DEFAULT_WORKSPACE_WHITELIST` is set (comma-separated git remote owners). `npx context-whisper` with an empty environment fails with `DEFAULT_WORKSPACE_WHITELIST is required when using the implicit 'default' environment`. Named environments still require `{ENV}_WORKSPACE_WHITELIST`. A 1.3.0 install that started with no env vars must set the variable before 1.4.0 will boot. The gate is intentional: the process must not accept every repository owner by default.
+
 ### Added
 - **Multi-database support**: SQLite, PostgreSQL, MySQL for relational data; sqlite-vec, pgvector, Qdrant for vectors.
 - **Flexible combinations**: Any relational DB can use Qdrant as vector store (MySQL/PostgreSQL/SQLite + Qdrant).
@@ -19,7 +22,7 @@ All notable changes to this project will be documented in this file.
 - **Package description**: Updated to reflect multi-database capabilities.
 
 ### Backward Compatibility
-- **Default behavior**: Without any environment configuration, the server uses SQLite + sqlite-vec (same as v1.3.0).
+- **Default store**: With no named `{ENV}_*` database variables, the server still uses SQLite + sqlite-vec. It does not start until `DEFAULT_WORKSPACE_WHITELIST` is set. See Breaking above.
 - **Legacy API**: The `db.ts` module maintains backward-compatible functions (marked as deprecated).
 - **Environment variables**: Existing `CONTEXT_WHISPER_DB_PATH` and `CONTEXT_WHISPER_VEC_LIB` continue to work.
 
@@ -27,9 +30,11 @@ All notable changes to this project will be documented in this file.
 
 Ambientes representam bancos locais ou corporativos (ex: `LOCAL_`, `ACME_CORP_`, `STARTUP_XYZ_`).
 
-#### Single SQLite (default, backward compatible)
+#### Single SQLite (default)
 ```bash
-# No configuration needed - uses ~/.local/share/context-whisper/meta.sqlite
+# Required since 1.4.0. Comma-separated git remote owners.
+export DEFAULT_WORKSPACE_WHITELIST=nicolas-costa
+# Database file: ~/.local/share/context-whisper/meta.sqlite
 ```
 
 #### PostgreSQL + pgvector (empresa com infra própria)

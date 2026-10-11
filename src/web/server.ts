@@ -8,6 +8,7 @@ const __dirname = path.dirname(__filename);
 
 let child: ChildProcess | null = null;
 let currentUrl: string | null = null;
+let currentEnvironment: string | null = null;
 
 export const WEB_UI_SERVER_VERSION = '1.4.0';
 
@@ -17,7 +18,13 @@ export interface ServerOptions {
 }
 
 export async function startServer(options: ServerOptions): Promise<string> {
+  const envName = options.adapter.environmentName;
   if (child && currentUrl) {
+    if (currentEnvironment && currentEnvironment !== envName) {
+      throw new Error(
+        `Notes UI is already running for environment '${currentEnvironment}' at ${currentUrl}. Stop it before starting '${envName}'.`
+      );
+    }
     return currentUrl;
   }
 
@@ -25,9 +32,6 @@ export async function startServer(options: ServerOptions): Promise<string> {
   const scriptPath = path.join(__dirname, scriptName);
 
   return new Promise((resolve, reject) => {
-    // Pass environment name to the child process
-    const envName = options.adapter.environmentName;
-
     child = fork(scriptPath, [process.env.CONTEXT_WHISPER_DB_PATH || '', options.cwd, envName], {
       stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
       env: { ...process.env },
@@ -36,6 +40,7 @@ export async function startServer(options: ServerOptions): Promise<string> {
     child.on('message', (msg: any) => {
       if (msg.type === 'ready') {
         currentUrl = msg.url;
+        currentEnvironment = envName;
         resolve(msg.url);
       }
     });
@@ -44,6 +49,7 @@ export async function startServer(options: ServerOptions): Promise<string> {
       console.error('Web server process error:', err);
       child = null;
       currentUrl = null;
+      currentEnvironment = null;
       reject(err);
     });
 
@@ -53,6 +59,7 @@ export async function startServer(options: ServerOptions): Promise<string> {
       }
       child = null;
       currentUrl = null;
+      currentEnvironment = null;
     });
   });
 }
@@ -64,6 +71,7 @@ export async function stopServer() {
       if (child) child.kill();
       child = null;
       currentUrl = null;
+      currentEnvironment = null;
     }, 1000);
   }
 }

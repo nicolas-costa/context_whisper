@@ -167,7 +167,7 @@ const UpsertNoteSchema = z.object({
   // Prevent trivial DoS by sending massive payloads.
   body_md: z.string().max(1_000_000),
   created_by: z.string().nullable().optional(),
-  review_status: z.enum(['DRAFT', 'APPROVED']).optional(),
+  review_status: z.enum(['DRAFT']).optional(),
   links: z
     .array(
       z.object({
@@ -314,8 +314,8 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
               },
               review_status: {
                 type: 'string',
-                enum: ['DRAFT', 'APPROVED'],
-                description: 'Status de revisão',
+                enum: ['DRAFT'],
+                description: 'Somente DRAFT. Aprovação é a tool approve_note.',
               },
               links: {
                 type: 'array',
@@ -692,7 +692,8 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
           const result = await notes.getNote(
             adapter,
             paramsWithContext as notes.GetNoteParams,
-            rawParams.cwd
+            rawParams.cwd,
+            await resolveActingAccount(adapter)
           );
 
           if (!result.note) {
@@ -910,7 +911,8 @@ export function setupMCPServer(server: Server, dbManager: DatabaseManager): void
           const result = await notes.listTopics(
             adapter,
             paramsWithContext as notes.ListTopicsParams,
-            rawParams.cwd
+            rawParams.cwd,
+            await resolveActingAccount(adapter)
           );
 
           return {

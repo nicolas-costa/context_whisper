@@ -71,7 +71,9 @@ export async function createDatabaseAdapter(config: EnvironmentConfig): Promise<
       switch (relational.type) {
         case 'sqlite': {
           const sqliteConfig = relational as SQLiteConfig;
-          const { adapter: sqliteAdapter } = openSQLiteDatabase(sqliteConfig, name);
+          const { adapter: sqliteAdapter } = openSQLiteDatabase(sqliteConfig, name, {
+            requireVec: false,
+          });
           relationalAdapter = sqliteAdapter.relational;
           break;
         }
@@ -206,9 +208,9 @@ export function parseEnvironmentConfig(
   const workspaceWhitelistRaw = envVars[`${prefix}WORKSPACE_WHITELIST`];
   const allowedWorkspaces = workspaceWhitelistRaw
     ? workspaceWhitelistRaw
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean)
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
     : undefined;
 
   // Check for SQLite config

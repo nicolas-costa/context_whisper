@@ -2,7 +2,11 @@
 -- Statements are separated by `-- @split`.
 
 ALTER TABLE notes
-  ADD COLUMN deleted_at TIMESTAMP NULL DEFAULT NULL,
+  ADD COLUMN deleted_at TIMESTAMP NULL DEFAULT NULL
+
+-- @split
+
+ALTER TABLE notes
   ADD COLUMN deleted_by VARCHAR(255) NULL
 
 -- @split
@@ -22,7 +26,11 @@ ALTER TABLE notes
         WHEN deleted_at IS NULL THEN SHA2(CONCAT_WS(UNHEX('1F'), workspace, project, topic, subtopic), 256)
         ELSE NULL
       END
-    ) STORED,
+    ) STORED
+
+-- @split
+
+ALTER TABLE notes
   ADD UNIQUE KEY uq_notes_live (live_scope_hash)
 
 -- @split
@@ -70,16 +78,42 @@ DROP FUNCTION IF EXISTS cw_is_engineer_session
 
 CREATE FUNCTION cw_is_engineer_session()
 RETURNS TINYINT
-DETERMINISTIC
+NOT DETERMINISTIC
+READS SQL DATA
+SQL SECURITY DEFINER
 BEGIN
   DECLARE actor VARCHAR(255);
-  DECLARE active_role VARCHAR(255);
-  SET actor = SUBSTRING_INDEX(CURRENT_USER(), '@', 1);
-  SET active_role = IFNULL(CURRENT_ROLE(), '');
-  IF actor = 'tech_lead' OR active_role LIKE '%`tech_lead`%' OR active_role LIKE '%''tech_lead''%' THEN
+  DECLARE has_lead INT DEFAULT 0;
+  DECLARE has_engineer INT DEFAULT 0;
+
+  -- USER() is the connecting account. CURRENT_USER() inside a DEFINER routine is the creator.
+  SET actor = SUBSTRING_INDEX(USER(), '@', 1);
+  IF actor = 'tech_lead' THEN
     RETURN 0;
   END IF;
-  IF actor = 'engineer' OR active_role LIKE '%`engineer`%' OR active_role LIKE '%''engineer''%' THEN
+  IF actor = 'engineer' THEN
+    RETURN 1;
+  END IF;
+
+  -- Inherited role. Each lookup fails open when the definer cannot read mysql.role_edges.
+  -- Column GRANT on notes.review_status is the barrier in that case.
+  BEGIN
+    DECLARE CONTINUE HANDLER FOR SQLEXCEPTION SET has_lead = 0;
+    SELECT COUNT(*) INTO has_lead
+    FROM mysql.role_edges
+    WHERE TO_USER = actor AND FROM_USER = 'tech_lead';
+  END;
+  BEGIN
+    DECLARE CONTINUE HANDLER FOR SQLEXCEPTION SET has_engineer = 0;
+    SELECT COUNT(*) INTO has_engineer
+    FROM mysql.role_edges
+    WHERE TO_USER = actor AND FROM_USER = 'engineer';
+  END;
+
+  IF has_lead > 0 THEN
+    RETURN 0;
+  END IF;
+  IF has_engineer > 0 THEN
     RETURN 1;
   END IF;
   RETURN 0;

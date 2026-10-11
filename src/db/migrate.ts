@@ -32,12 +32,25 @@ export function listMigrationFiles(dir: string): Array<{ version: number; sql: s
 export async function applyMigrations(options: {
   dir: string;
   currentVersion: number;
-  execute: (sql: string) => Promise<void>;
-  recordVersion: (version: number) => Promise<void>;
+  execute?: (sql: string) => Promise<void>;
+  recordVersion?: (version: number) => Promise<void>;
+  /**
+   * Run every statement of one migration on a single session, then record the version.
+   * Adapters use this for a transaction (SQLite, Postgres) or a held connection (MySQL DDL).
+   */
+  run?: (statements: string[], version: number) => Promise<void>;
 }): Promise<void> {
   for (const migration of listMigrationFiles(options.dir)) {
     if (migration.version <= options.currentVersion) continue;
-    for (const statement of splitMigrationScript(migration.sql)) {
+    const statements = splitMigrationScript(migration.sql);
+    if (options.run) {
+      await options.run(statements, migration.version);
+      continue;
+    }
+    if (!options.execute || !options.recordVersion) {
+      throw new Error('applyMigrations requires execute and recordVersion when run is not set');
+    }
+    for (const statement of statements) {
       await options.execute(statement);
     }
     await options.recordVersion(migration.version);

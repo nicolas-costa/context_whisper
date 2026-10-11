@@ -99,7 +99,12 @@ const server = http.createServer(async (req, res) => {
         const workspace = url.searchParams.get('workspace') || undefined;
         const project = url.searchParams.get('project') || undefined;
 
-        const result = await notes.listTopics(adapter, { workspace, project }, cwd);
+        const result = await notes.listTopics(
+          adapter,
+          { workspace, project },
+          cwd,
+          await resolveActingAccount(adapter)
+        );
         res.end(JSON.stringify({ ok: true, ...result }));
         return;
       }
@@ -221,7 +226,12 @@ const server = http.createServer(async (req, res) => {
         const workspace = url.searchParams.get('workspace') || undefined;
         const project = url.searchParams.get('project') || undefined;
 
-        const result = await notes.getNote(adapter, { topic, subtopic, workspace, project }, cwd);
+        const result = await notes.getNote(
+          adapter,
+          { topic, subtopic, workspace, project },
+          cwd,
+          await resolveActingAccount(adapter)
+        );
 
         if (!result.note) {
           res.statusCode = 404;

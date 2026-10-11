@@ -31,6 +31,27 @@ function escapeLike(input: string): string {
   return input.replace(/[\\%_]/g, '\\$&');
 }
 
+/** DDL errors that mean a previous attempt already applied this statement. */
+function isBenignMysqlMigrationError(error: unknown): boolean {
+  const err = error as { code?: string; errno?: number };
+  const code = err?.code ?? '';
+  const errno = Number(err?.errno);
+  return (
+    code === 'ER_DUP_FIELDNAME' ||
+    code === 'ER_CANT_DROP_FIELD_OR_KEY' ||
+    code === 'ER_DUP_KEYNAME' ||
+    code === 'ER_TABLE_EXISTS_ERROR' ||
+    code === 'ER_SP_ALREADY_EXISTS' ||
+    code === 'ER_TRG_ALREADY_EXISTS' ||
+    errno === 1060 ||
+    errno === 1091 ||
+    errno === 1061 ||
+    errno === 1050 ||
+    errno === 1304 ||
+    errno === 1359
+  );
+}
+
 /**
  * MySQL Relational Adapter
  */
@@ -85,11 +106,21 @@ export class MySQLRelationalAdapter implements RelationalAdapter {
     await applyMigrations({
       dir: join(__dirname, '..', '..', '..', 'sql', 'mysql', 'migrations'),
       currentVersion: await this.getSchemaVersion(),
-      execute: async (sql) => {
-        await this.pool.query(sql);
-      },
-      recordVersion: async (version) => {
-        await this.pool.query('INSERT IGNORE INTO schema_version (version) VALUES (?)', [version]);
+      run: async (statements, version) => {
+        // MySQL DDL commits implicitly, so this is one connection for retry, not a transaction.
+        const conn = await this.pool.getConnection();
+        try {
+          for (const sql of statements) {
+            try {
+              await conn.query(sql);
+            } catch (error) {
+              if (!isBenignMysqlMigrationError(error)) throw error;
+            }
+          }
+          await conn.query('INSERT IGNORE INTO schema_version (version) VALUES (?)', [version]);
+        } finally {
+          conn.release();
+        }
       },
     });
   }
@@ -102,15 +133,19 @@ export class MySQLRelationalAdapter implements RelationalAdapter {
   private async ensureFullScopeUniqueness(): Promise<void> {
     const [cols] = (await this.pool.query(
       `
-      SELECT COUNT(*) AS c
+      SELECT
+        SUM(COLUMN_NAME = 'scope_hash') AS scope_hash,
+        SUM(COLUMN_NAME = 'live_scope_hash') AS live_scope_hash
       FROM information_schema.COLUMNS
       WHERE TABLE_SCHEMA = DATABASE()
         AND TABLE_NAME = 'notes'
-        AND COLUMN_NAME = 'scope_hash'
+        AND COLUMN_NAME IN ('scope_hash', 'live_scope_hash')
     `
     )) as any;
 
-    if (Number(cols[0]?.c) > 0) return;
+    // Migration 003 replaces scope_hash with live_scope_hash. Do not put the old key back.
+    if (Number(cols[0]?.live_scope_hash) > 0) return;
+    if (Number(cols[0]?.scope_hash) > 0) return;
 
     const [idx] = (await this.pool.query(
       `
@@ -202,21 +237,19 @@ export class MySQLRelationalAdapter implements RelationalAdapter {
       ]
     )) as any;
 
-    // Detect insert vs update reliably.
-    // MySQL typically returns affectedRows = 1 for insert and 2 for update in ON DUPLICATE KEY UPDATE.
+    // mysql2 uses CLIENT_FOUND_ROWS. affectedRows = 1 is an insert only when insertId is set.
+    // An unchanged duplicate also reports 1, with insertId 0.
     if (typeof result.affectedRows === 'number') {
-      if (result.affectedRows === 2) {
-        const note = await this.getNote(
-          params.workspace,
-          params.project,
-          params.topic,
-          params.subtopic
-        );
-        return note?.note_id ?? 0;
-      }
-      if (result.affectedRows === 1) {
+      if (result.affectedRows === 1 && Number(result.insertId) > 0) {
         return result.insertId;
       }
+      const note = await this.getNote(
+        params.workspace,
+        params.project,
+        params.topic,
+        params.subtopic
+      );
+      if (note) return note.note_id;
     }
 
     // Fallback for compatibility: keep old behavior when affectedRows isn't present.

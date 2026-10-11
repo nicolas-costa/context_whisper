@@ -78,29 +78,40 @@ Isto é responsabilidade de quem opera o PostgreSQL ou o MySQL da empresa.
 
 Um database (ou schema) por ambiente corporativo. Várias pessoas no mesmo banco. Uma linha por pessoa, não um banco por pessoa.
 
-| Objeto                | Função                                                                                                                                                                                                                                                                                                                                                              |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Conta por pessoa      | Modelo ideal. Cada um entra com a própria senha e herda o papel `engineer` ou `tech_lead`. Revogar uma pessoa não troca a senha das outras. O trigger vê o papel herdado, não o nome do usuário.                                                                                                                                                                    |
-| Conta por papel       | Mínimo aceitável. Uma conta `engineer` e uma `tech_lead`, compartilhadas por quem tem aquele papel. O trigger compara `current_user` com essas duas contas. Vazar um `mcp.json` entrega o papel inteiro.                                                                                                                                                            |
-| Login administrativo  | Fora do MCP. Cria accounts, troca role, revoga token.                                                                                                                                                                                                                                                                                                               |
-| `accounts`            | `id`, `name`, `token_hash`, `role` (`engineer` \| `tech_lead`), workspaces permitidos, `revoked_at`. O lookup do token passa por uma função que devolve a linha correspondente, sem conceder `SELECT` na coluna do hash.                                                                                                                                            |
-| `notes.review_status` | `DRAFT` ou `APPROVED`. Trigger recusa `APPROVED` para sessão cujo papel é `engineer` (papel herdado, ou `current_user = engineer` no modelo de conta por tipo). Sem `UPDATE` nessa coluna para quem escreve. O MCP também recusa a tool `approve_note`, para o agente receber o erro no tool call. A trava do bypass via SQL é o trigger (ou um `GRANT` de coluna). |
-| Soft-delete           | `deleted_at` / `deleted_by`. A nota some da busca e o vetor sai do índice. A linha fica para auditoria. Purge é operação à parte, privilegiada.                                                                                                                                                                                                                     |
-| Unicidade             | O escopo `(workspace, project, topic, subtopic)` é único entre notas vivas. Nota apagada não bloqueia recriar o mesmo tópico. No MySQL o índice único cabe numa coluna gerada (`NULL` quando `deleted_at` está preenchido), porque um índice das quatro colunas em `utf8mb4` estoura o limite do InnoDB.                                                            |
+| Objeto                | Função                                                                                                                                                                                                                                                                                                                                                        |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Conta por pessoa      | Modelo ideal. Cada um entra com a própria senha e herda o papel `engineer` ou `tech_lead`. Revogar uma pessoa não troca a senha das outras. O trigger vê o papel herdado, não o nome do usuário.                                                                                                                                                              |
+| Conta por papel       | Mínimo aceitável. Uma conta `engineer` e uma `tech_lead`, compartilhadas por quem tem aquele papel. No PostgreSQL o trigger usa `current_user`. No MySQL usa `USER()` (a sessão). `CURRENT_USER()` dentro de função `DEFINER` é o criador da função, não a pessoa. Vazar um `mcp.json` entrega o papel inteiro.                                               |
+| Login administrativo  | Fora do MCP. Cria accounts, troca role, revoga token.                                                                                                                                                                                                                                                                                                         |
+| `accounts`            | `id`, `name`, `token_hash`, `role` (`engineer` \| `tech_lead`), workspaces permitidos, `revoked_at`. O lookup do token passa por uma função que devolve a linha correspondente, sem conceder `SELECT` na coluna do hash.                                                                                                                                      |
+| `notes.review_status` | `DRAFT` ou `APPROVED`. Trigger recusa `APPROVED` para sessão `engineer`. No PostgreSQL o papel herdado entra via `pg_has_role`. No MySQL, conta por tipo entra via `USER()`; conta por pessoa só entra se o definer ler `mysql.role_edges`. Sem essa leitura, a trava da conta por pessoa no MySQL é o `GRANT` de coluna. O MCP também recusa `approve_note`. |
+| Soft-delete           | `deleted_at` / `deleted_by`. A nota some da busca e o vetor sai do índice. A linha fica para auditoria. Purge é operação à parte, privilegiada.                                                                                                                                                                                                               |
+| Unicidade             | O escopo `(workspace, project, topic, subtopic)` é único entre notas vivas. Nota apagada não bloqueia recriar o mesmo tópico. No MySQL o índice único cabe numa coluna gerada (`NULL` quando `deleted_at` está preenchido), porque um índice das quatro colunas em `utf8mb4` estoura o limite do InnoDB.                                                      |
 
 `engineer` escreve e mantém rascunho. `tech_lead` aprova. Os dois papéis apontam para o mesmo host e o mesmo database. Nenhum dos dois escreve em `accounts` / `roles` nem lê `token_hash`. A senha no `mcp.json` escolhe a conta (a pessoa, ou o papel). O token identifica a pessoa para o MCP.
 
-Busca corporativa deve ignorar nota apagada e, por default, rascunho. Draft só com filtro explícito. 
-Hoje a busca inclui os dois, salvo se o caller passar `review_status`.
+Busca ignora nota apagada. Com `CONTEXT_WHISPER_ACCOUNT_TOKEN`, o default é `review_status=APPROVED`; rascunho só com filtro explícito. Sem token (SQLite local), a busca inclui rascunho salvo filtro. Conta com `workspaces` preenchido não faz busca global.
 
-Qdrant, quando usado, guarda vetor. A nota relacional é a fonte. Apagar ou ocultar a nota tem que tirar o ponto do Qdrant. 
+Qdrant, quando usado, guarda vetor. A nota relacional é a fonte. Apagar ou ocultar a nota tem que tirar o ponto do Qdrant.
 O vector store não é o cadastro de pessoas nem de roles.
 
 SSL termina no servidor do banco. A config do MCP só liga `PG_SSL` / `MYSQL_SSL` e, se preciso, desliga a validação do certificado em dev.
 
 ### SQLite + sqlite-vec (Default)
 
-Sem configuração necessária. O banco é criado automaticamente em:
+**Breaking change em 1.4.0.** O ambiente implícito `default` só sobe se `DEFAULT_WORKSPACE_WHITELIST` estiver definido. É a lista de owners de repositório que esse processo aceita, separada por vírgula. Sem ela o processo recusa a subida:
+
+```text
+DEFAULT_WORKSPACE_WHITELIST is required when using the implicit 'default' environment
+```
+
+```bash
+export DEFAULT_WORKSPACE_WHITELIST=nicolas-costa
+```
+
+Quem usava `npx context-whisper` sem variável de ambiente em 1.3.0 precisa setar isso no 1.4.0. Ambiente nomeado continua exigindo `{ENV}_WORKSPACE_WHITELIST`. O whitelist roteia repositório. Não é papel de pessoa.
+
+O banco é criado automaticamente em:
 
 - **Linux**: `~/.local/share/context-whisper/meta.sqlite`
 - **macOS**: `~/Library/Application Support/context-whisper/meta.sqlite`
@@ -228,6 +239,7 @@ CONTEXT_WHISPER_ENV=BIGCLIENT context-whisper
       "args": ["context-whisper"],
       "env": {
         "LOCAL_SQLITE_PATH": "/home/user/.local/share/context-whisper/local.sqlite",
+        "LOCAL_WORKSPACE_WHITELIST": "local-owner",
 
         "ACME_CORP_PG_HOST": "db.acme-corp.internal",
         "ACME_CORP_PG_USER": "whisper",
@@ -249,6 +261,8 @@ CONTEXT_WHISPER_ENV=BIGCLIENT context-whisper
 ```
 
 A senha nesse JSON é a conta de banco da pessoa ou, no mínimo, a do papel (`engineer` ou `tech_lead`). Não é uma conta compartilhada pelos dois papéis. O token da pessoa é outro segredo. Role não vai em campo de tool. Veja a seção de banco corporativo acima.
+
+Se o JSON não declarar nenhum ambiente `{ENV}_*`, o processo cai no SQLite implícito e exige `DEFAULT_WORKSPACE_WHITELIST` (owners, separados por vírgula). Com ambiente nomeado, a variável é `{ENV}_WORKSPACE_WHITELIST`, como `LOCAL_WORKSPACE_WHITELIST` acima. Sem uma das duas, a subida falha. Isso é breaking change em relação ao 1.3.0, que subia sem whitelist.
 
 ## Instalação do sqlite-vec (Para SQLite)
 

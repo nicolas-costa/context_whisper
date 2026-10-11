@@ -97,11 +97,21 @@ export class SQLiteRelationalAdapter implements RelationalAdapter {
     await applyMigrations({
       dir: join(__dirname, '..', '..', '..', 'sql', 'sqlite', 'migrations'),
       currentVersion: await this.getSchemaVersion(),
-      execute: async (sql) => {
-        this.db.exec(sql);
-      },
-      recordVersion: async (version) => {
-        this.db.prepare('INSERT INTO schema_version (version) VALUES (?)').run(version);
+      run: async (statements, version) => {
+        // PRAGMA foreign_keys does not take effect inside a transaction.
+        this.db.pragma('foreign_keys = OFF');
+        try {
+          const apply = this.db.transaction((stmts: string[]) => {
+            for (const sql of stmts) {
+              if (/^PRAGMA\b/i.test(sql)) continue;
+              this.db.exec(sql);
+            }
+            this.db.prepare('INSERT INTO schema_version (version) VALUES (?)').run(version);
+          });
+          apply(statements);
+        } finally {
+          this.db.pragma('foreign_keys = ON');
+        }
       },
     });
   }
@@ -768,17 +778,25 @@ export class SQLiteDatabaseAdapter implements DatabaseAdapter {
 }
 
 /**
- * Open SQLite database and load sqlite-vec extension
+ * Open SQLite. `requireVec` is false when Qdrant owns the vectors:
+ * that combination must not load sqlite-vec.
  */
 export function openSQLiteDatabase(
   config: SQLiteConfig,
-  environmentName: string = 'default'
+  environmentName: string = 'default',
+  options?: { requireVec?: boolean }
 ): { db: Database.Database; adapter: SQLiteDatabaseAdapter } {
   const db = new Database(config.path);
+  const requireVec = options?.requireVec !== false;
 
   try {
     db.pragma('journal_mode = WAL');
     db.pragma('synchronous = NORMAL');
+
+    if (!requireVec) {
+      const adapter = new SQLiteDatabaseAdapter(db, environmentName);
+      return { db, adapter };
+    }
 
     if (!config.vecLibPath) {
       throw new Error('sqlite-vec extension not found. Vector search is REQUIRED for RAG.');

@@ -208,7 +208,8 @@ export async function upsertNote(
 export async function getNote(
   adapter: DatabaseAdapter,
   params: GetNoteParams,
-  cwd?: string
+  cwd?: string,
+  account?: Account | null
 ): Promise<GetNoteResult> {
   const context = detectContext(
     {
@@ -217,6 +218,8 @@ export async function getNote(
     },
     cwd
   );
+
+  assertAccountWorkspace(account ?? null, context.workspace);
 
   const note = await adapter.relational.getNote(
     context.workspace,
@@ -256,6 +259,15 @@ export async function searchNotes(
 
   const queryEmbedding = await embeds.embed(params.query);
 
+  if (params.global && account?.workspaces && account.workspaces.length > 0) {
+    throw new Error(
+      `Account '${account.name}' cannot search across workspaces. Allowed: ${account.workspaces.join(', ')}`
+    );
+  }
+  if (!params.global) {
+    assertAccountWorkspace(account ?? null, context.workspace);
+  }
+
   const repoFingerprint = params.global ? undefined : (context.repo_fingerprint ?? undefined);
   const repoUrl = params.global ? undefined : (params.repo_url ?? context.repo_url ?? undefined);
   const workspace = params.global ? null : context.workspace;
@@ -283,7 +295,8 @@ export async function searchNotes(
 export async function listTopics(
   adapter: DatabaseAdapter,
   params: ListTopicsParams,
-  cwd?: string
+  cwd?: string,
+  account?: Account | null
 ): Promise<ListTopicsResult> {
   const context = detectContext(
     {
@@ -293,6 +306,8 @@ export async function listTopics(
     },
     cwd
   );
+
+  assertAccountWorkspace(account ?? null, context.workspace);
 
   const topics = await adapter.relational.listTopics(context.workspace, context.project);
 
@@ -397,7 +412,7 @@ export async function deleteNote(
     if (isPermissionDenied(err)) {
       warnings.push(
         `Vector delete not permitted by vector store credentials for environment '${adapter.environmentName}'. ` +
-          `The note was deleted from the relational database but the vector may remain orphaned.`
+        `The note was deleted from the relational database but the vector may remain orphaned.`
       );
       return { deleted: true, context, vector_deleted: false, warnings };
     }

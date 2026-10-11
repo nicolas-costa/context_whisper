@@ -101,14 +101,28 @@ export class PostgresRelationalAdapter implements RelationalAdapter {
     await applyMigrations({
       dir: join(__dirname, '..', '..', '..', 'sql', 'postgres', 'migrations'),
       currentVersion: await this.getSchemaVersion(),
-      execute: async (sql) => {
-        await this.pool.query(sql);
-      },
-      recordVersion: async (version) => {
-        await this.pool.query(
-          'INSERT INTO schema_version (version) VALUES ($1) ON CONFLICT (version) DO NOTHING',
-          [version]
-        );
+      run: async (statements, version) => {
+        const client = await this.pool.connect();
+        try {
+          await client.query('BEGIN');
+          for (const sql of statements) {
+            await client.query(sql);
+          }
+          await client.query(
+            'INSERT INTO schema_version (version) VALUES ($1) ON CONFLICT (version) DO NOTHING',
+            [version]
+          );
+          await client.query('COMMIT');
+        } catch (error) {
+          try {
+            await client.query('ROLLBACK');
+          } catch {
+            // The original error is the one that matters.
+          }
+          throw error;
+        } finally {
+          client.release();
+        }
       },
     });
   }
