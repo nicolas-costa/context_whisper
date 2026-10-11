@@ -5,14 +5,14 @@ import { createHash } from 'crypto';
 import { env } from 'process';
 
 export interface DetectedContext {
-  workspace: string;              // = owner
-  project: string;                // = repo
-  repo_url?: string;              // URL canônica (https://...)
-  repo_provider?: string;         // github|gitlab|bitbucket|other
+  workspace: string; // = owner
+  project: string; // = repo
+  repo_url?: string; // URL canônica (https://...)
+  repo_provider?: string; // github|gitlab|bitbucket|other
   repo_owner?: string;
   repo_name?: string;
-  repo_fingerprint?: string;      // SHA1 da URL
-  confidence: number;              // 0.5..1.0
+  repo_fingerprint?: string; // SHA1 da URL
+  confidence: number; // 0.5..1.0
   inferred: boolean;
   source: 'payload' | 'env' | 'dotfile' | 'git' | 'monorepo' | 'path' | 'default';
 }
@@ -108,7 +108,7 @@ function detectFromGit(cwd: string): Partial<DetectedContext> | null {
     let gitRoot = cwd;
     let found = false;
     const maxLevels = 20; // Increased from 10 to handle config dirs like ~/.cursor
-    
+
     for (let i = 0; i < maxLevels; i++) {
       const gitDir = join(gitRoot, '.git');
       if (existsSync(gitDir)) {
@@ -125,17 +125,24 @@ function detectFromGit(cwd: string): Partial<DetectedContext> | null {
     if (!found) {
       const parts = cwd.split('/').filter(Boolean);
       // Look for home directory (usually contains projects)
-      const homeIndex = parts.findIndex(p => ['home', 'Users', 'users'].includes(p));
+      const homeIndex = parts.findIndex((p) => ['home', 'Users', 'users'].includes(p));
       if (homeIndex >= 0 && homeIndex + 1 < parts.length) {
         const username = parts[homeIndex + 1];
         const homePath = join('/', ...parts.slice(0, homeIndex + 2));
-        
+
         // Check common project directory names
-        const commonProjectDirs = ['Development', 'dev', 'projects', 'code', 'Documents', 'Desktop'];
+        const commonProjectDirs = [
+          'Development',
+          'dev',
+          'projects',
+          'code',
+          'Documents',
+          'Desktop',
+        ];
         for (const projectDirName of commonProjectDirs) {
           const projectBase = join(homePath, projectDirName);
           if (!existsSync(projectBase)) continue;
-          
+
           // Try to find Git repos by searching subdirectories (limited depth)
           try {
             // Use find command to locate .git directories (max depth 3: Development/Web/repo)
@@ -144,7 +151,7 @@ function detectFromGit(cwd: string): Partial<DetectedContext> | null {
               encoding: 'utf-8',
               stdio: ['ignore', 'pipe', 'ignore'],
             }).trim();
-            
+
             if (gitPath) {
               // Extract the repo root directory (parent of .git)
               const repoRoot = dirname(gitPath);
@@ -238,24 +245,32 @@ function detectFromMonorepo(cwd: string): Partial<DetectedContext> | null {
 function detectFromPath(cwd: string): Partial<DetectedContext> {
   // Common directories to skip when inferring workspace (system dirs)
   const skipDirs = new Set(['home', 'users', 'user', 'usr', 'var', 'tmp', 'opt', 'root']);
-  
+
   // Config directories that indicate we're in a config location, not a project
   const configDirs = new Set(['.cursor', '.vscode', '.config', '.local', 'appdata', 'roaming']);
-  
+
   // Common directories that are just containers, not meaningful workspaces
-  const containerDirs = new Set(['development', 'dev', 'projects', 'code', 'workspace', 'workspaces']);
-  
+  const containerDirs = new Set([
+    'development',
+    'dev',
+    'projects',
+    'code',
+    'workspace',
+    'workspaces',
+  ]);
+
   // Normalize directory names
   const normalize = (name: string) => name.toLowerCase().replace(/[^a-z0-9-_]/g, '-');
 
   const parts = cwd.split('/').filter(Boolean);
   const lastPart = parts.length > 0 ? parts[parts.length - 1].toLowerCase() : '';
-  
+
   // If we're in a config directory (like ~/.cursor), detection from path is unreliable
   // We should rely on Git detection or other methods first, but still provide a fallback
   let projectDir: string | null = null;
-  const isConfigDir = configDirs.has(lastPart) || (parts.length > 0 && parts[parts.length - 1].startsWith('.'));
-  
+  const isConfigDir =
+    configDirs.has(lastPart) || (parts.length > 0 && parts[parts.length - 1].startsWith('.'));
+
   if (isConfigDir) {
     // We're in a config directory - try to find actual project by looking for Git repos
     // This is a heuristic that might not always work, but better than using config dir
@@ -269,23 +284,23 @@ function detectFromPath(cwd: string): Partial<DetectedContext> {
         join(current, 'projects'),
         join(current, 'code'),
       ];
-      
+
       for (const devPath of devPaths) {
         // Simple heuristic: if Development/ exists, maybe use the most recent modified dir?
         // Actually, this is getting too complex. Let's just use a simple fallback.
       }
-      
+
       // Check if current directory itself is a project
       if (existsSync(join(current, '.git'))) {
         projectDir = current;
         break;
       }
-      
+
       const parent = dirname(current);
       if (parent === current) break;
       current = parent;
     }
-    
+
     // If we're in a config dir and didn't find a project, return low confidence
     // The Git detection (which runs earlier) should catch this, but if not, path detection won't help
     if (!projectDir) {
@@ -299,36 +314,36 @@ function detectFromPath(cwd: string): Partial<DetectedContext> {
       };
     }
   }
-  
+
   // Use found project directory or current directory
   const effectiveCwd = projectDir || cwd;
   const effectiveParts = effectiveCwd.split('/').filter(Boolean);
   const currentDir = effectiveParts[effectiveParts.length - 1]; // Last part = project
-  
+
   // Find workspace: go up the path, skip system/config/container directories
   let workspaceDir: string | null = null;
   for (let i = effectiveParts.length - 2; i >= 0; i--) {
     const dir = effectiveParts[i].toLowerCase();
-    if (!skipDirs.has(dir) && 
-        !configDirs.has(dir) && 
-        !containerDirs.has(dir)) {
+    if (!skipDirs.has(dir) && !configDirs.has(dir) && !containerDirs.has(dir)) {
       workspaceDir = effectiveParts[i];
       break;
     }
   }
-  
+
   // If we didn't find a meaningful workspace, try the parent of current dir
   // but skip if it's a common directory
   if (!workspaceDir && effectiveParts.length > 1) {
     const parentDir = effectiveParts[effectiveParts.length - 2];
     const parentDirLower = parentDir.toLowerCase();
-    if (!skipDirs.has(parentDirLower) && 
-        !configDirs.has(parentDirLower) && 
-        !containerDirs.has(parentDirLower)) {
+    if (
+      !skipDirs.has(parentDirLower) &&
+      !configDirs.has(parentDirLower) &&
+      !containerDirs.has(parentDirLower)
+    ) {
       workspaceDir = parentDir;
     }
   }
-  
+
   // Fallback: use parent dir even if it's a skip dir (but warn with low confidence)
   let confidence = 0.6;
   if (!workspaceDir && effectiveParts.length > 1) {
@@ -358,11 +373,11 @@ function readProjectConfig(cwd: string): Partial<DetectedContext> | null {
       try {
         const content = readFileSync(configPath, 'utf-8');
         const config = JSON.parse(content) as Partial<DetectedContext>;
-        
+
         if (config.repo_url && !config.repo_fingerprint) {
           config.repo_fingerprint = fingerprintRepoUrl(config.repo_url);
         }
-        
+
         if (config.repo_url && !config.repo_provider && !config.repo_owner && !config.repo_name) {
           const normalized = normalizeRepoUrl(config.repo_url);
           if (normalized) {
@@ -410,7 +425,7 @@ export function detectContext(
   // 1. Payload explícito (maior prioridade)
   if (payload) {
     context = { ...payload };
-    
+
     // Normalize repo_url if provided - this is the PRIMARY source
     if (payload.repo_url && !payload.repo_fingerprint) {
       const normalized = normalizeRepoUrl(payload.repo_url);
@@ -420,7 +435,7 @@ export function detectContext(
         context.repo_owner = normalized.owner;
         context.repo_name = normalized.name;
         context.repo_fingerprint = fingerprintRepoUrl(normalized.url);
-        
+
         // If repo_url is provided, derive workspace/project from it if not explicitly provided
         if (!payload.workspace && normalized.owner) {
           context.workspace = normalized.owner;
@@ -486,7 +501,7 @@ export function detectContext(
       context.source = 'monorepo';
     }
   }
-  
+
   // Note: We don't use Git detection or Path detection as fallbacks since:
   // - Git detection requires server to be in project context (not the case)
   // - Path detection is unreliable and doesn't provide repo_url
@@ -518,4 +533,3 @@ export function detectContext(
 
   return finalContext;
 }
-

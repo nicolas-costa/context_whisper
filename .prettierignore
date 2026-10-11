@@ -1,0 +1,8 @@
+node_modules
+dist
+*.db
+*.sqlite
+*.sqlite3
+package-lock.json
+coverage
+*.log

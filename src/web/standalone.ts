@@ -2,9 +2,11 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { openDB } from '../db.js';
+import { openSQLiteDatabase } from '../db.js';
 import * as notes from '../notes.js';
-import { resolveConfig } from '../config.js';
+import { resolveActingAccount } from '../accounts.js';
+import { resolveConfig, getEnvironmentConfig } from '../config.js';
+import { createDatabaseAdapter } from '../db/factory.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,13 +15,48 @@ const __dirname = path.dirname(__filename);
 const args = process.argv.slice(2);
 const dbPath = args[0];
 const cwd = args[1] || process.cwd();
-const vecLibPath = process.env.CONTEXT_WHISPER_VEC_LIB;
+const envName = args[2] || undefined;
 
-// Initialize DB
-const config = resolveConfig(dbPath, vecLibPath);
-const db = openDB(config.dbPath, config.vecLibPath);
+// Initialize DB using adapter system
+const config = resolveConfig(dbPath, process.env.CONTEXT_WHISPER_VEC_LIB);
+
+// Determine which environment to use
+const targetEnv = envName || config.defaultEnvironment;
+const envConfig = getEnvironmentConfig(config, targetEnv);
+
+let adapterPromise: Promise<any>;
+
+if (envConfig) {
+  // Use the configured environment
+  adapterPromise = createDatabaseAdapter(envConfig);
+} else {
+  // Fallback to default SQLite
+  adapterPromise = Promise.resolve(
+    openSQLiteDatabase(
+      { type: 'sqlite', path: config.dbPath, vecLibPath: config.vecLibPath },
+      'default'
+    ).adapter
+  );
+}
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
+
+const corsAllowList = (process.env.CONTEXT_WHISPER_UI_CORS_ORIGINS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+function applyCors(req: http.IncomingMessage, res: http.ServerResponse) {
+  const origin = req.headers.origin;
+  if (!origin) return;
+  if (corsAllowList.length === 0) return; // default: no CORS
+  if (!corsAllowList.includes(origin)) return;
+
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+}
 
 // Mime types
 const MIMES: Record<string, string> = {
@@ -29,37 +66,49 @@ const MIMES: Record<string, string> = {
   '.json': 'application/json',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
-  '.svg': 'image/svg+xml'
+  '.svg': 'image/svg+xml',
 };
 
 const server = http.createServer(async (req, res) => {
-  // CORS
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  // CORS: default deny (same-origin works without CORS headers).
+  applyCors(req, res);
 
   if (req.method === 'OPTIONS') {
-    res.writeHead(204);
+    // Only allow preflight for explicitly allowed origins.
+    const origin = req.headers.origin;
+    if (origin && corsAllowList.length > 0 && corsAllowList.includes(origin)) {
+      res.writeHead(204);
+    } else {
+      res.writeHead(403);
+    }
     res.end();
     return;
   }
 
   try {
+    // Get adapter (wait for initialization)
+    const adapter = await adapterPromise;
+
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
-    
+
     // API Routes
     if (url.pathname.startsWith('/api/')) {
       res.setHeader('Content-Type', 'application/json');
-      
+
       if (url.pathname === '/api/topics') {
         const workspace = url.searchParams.get('workspace') || undefined;
         const project = url.searchParams.get('project') || undefined;
-        
-        const result = notes.listTopics(db, { workspace, project }, cwd);
+
+        const result = await notes.listTopics(
+          adapter,
+          { workspace, project },
+          cwd,
+          await resolveActingAccount(adapter)
+        );
         res.end(JSON.stringify({ ok: true, ...result }));
         return;
       }
-      
+
       if (url.pathname === '/api/search') {
         const q = url.searchParams.get('q');
         if (!q) {
@@ -67,20 +116,21 @@ const server = http.createServer(async (req, res) => {
           res.end(JSON.stringify({ ok: false, error: 'Missing query parameter "q"' }));
           return;
         }
-        
+
         const workspace = url.searchParams.get('workspace') || undefined;
         const project = url.searchParams.get('project') || undefined;
         const global = url.searchParams.get('global') === 'true';
-        
+
         const result = await notes.searchNotes(
-          db,
+          adapter,
           { query: q, workspace, project, global },
-          cwd
+          cwd,
+          await resolveActingAccount(adapter)
         );
         res.end(JSON.stringify({ ok: true, ...result }));
         return;
       }
-      
+
       if (url.pathname === '/api/note' && req.method === 'PUT') {
         // Update note metadata (topic/subtopic/status) by note_id
         let body = '';
@@ -116,22 +166,25 @@ const server = http.createServer(async (req, res) => {
         }
         if (review_status !== 'DRAFT' && review_status !== 'APPROVED') {
           res.statusCode = 400;
-          res.end(JSON.stringify({ ok: false, error: 'Invalid review_status (expected DRAFT|APPROVED)' }));
+          res.end(
+            JSON.stringify({ ok: false, error: 'Invalid review_status (expected DRAFT|APPROVED)' })
+          );
           return;
         }
 
         try {
-          const result = notes.updateNoteMeta(
-            db,
+          const result = await notes.updateNoteMeta(
+            adapter,
             {
               note_id,
               topic,
               subtopic: subtopic ? subtopic : null,
-              review_status,
+              review_status: review_status as 'DRAFT' | 'APPROVED',
               workspace,
               project,
             },
-            cwd
+            cwd,
+            await resolveActingAccount(adapter)
           );
 
           if (!result.note) {
@@ -147,7 +200,12 @@ const server = http.createServer(async (req, res) => {
           // UNIQUE(workspace, project, topic, subtopic) conflicts
           if (msg.includes('UNIQUE') || msg.includes('constraint failed')) {
             res.statusCode = 409;
-            res.end(JSON.stringify({ ok: false, error: 'Conflict: a note with the same topic/subtopic already exists' }));
+            res.end(
+              JSON.stringify({
+                ok: false,
+                error: 'Conflict: a note with the same topic/subtopic already exists',
+              })
+            );
             return;
           }
           res.statusCode = 500;
@@ -163,17 +221,18 @@ const server = http.createServer(async (req, res) => {
           res.end(JSON.stringify({ ok: false, error: 'Missing topic parameter' }));
           return;
         }
-        
+
         const subtopic = url.searchParams.get('subtopic') || null;
         const workspace = url.searchParams.get('workspace') || undefined;
         const project = url.searchParams.get('project') || undefined;
-        
-        const result = notes.getNote(
-          db,
+
+        const result = await notes.getNote(
+          adapter,
           { topic, subtopic, workspace, project },
-          cwd
+          cwd,
+          await resolveActingAccount(adapter)
         );
-        
+
         if (!result.note) {
           res.statusCode = 404;
           res.end(JSON.stringify({ ok: false, error: 'Note not found', ...result }));
@@ -183,11 +242,11 @@ const server = http.createServer(async (req, res) => {
         if (result.note && result.note.tags_json) {
           (result.note as any).tags = JSON.parse(result.note.tags_json);
         }
-        
+
         res.end(JSON.stringify({ ok: true, ...result }));
         return;
       }
-      
+
       res.statusCode = 404;
       res.end(JSON.stringify({ ok: false, error: 'Endpoint not found' }));
       return;
@@ -195,7 +254,7 @@ const server = http.createServer(async (req, res) => {
 
     // Static Files
     let filePath = path.join(PUBLIC_DIR, url.pathname === '/' ? 'index.html' : url.pathname);
-    
+
     // Prevent directory traversal
     if (!filePath.startsWith(PUBLIC_DIR)) {
       res.statusCode = 403;
@@ -211,7 +270,6 @@ const server = http.createServer(async (req, res) => {
       res.statusCode = 404;
       res.end('Not found');
     }
-
   } catch (err) {
     console.error(err);
     res.statusCode = 500;
@@ -236,13 +294,20 @@ process.on('message', (msg) => {
   }
 });
 
-// Start
-server.listen(0, '127.0.0.1', () => {
-  const addr = server.address() as any;
-  const port = addr.port;
-  if (process.send) {
-    process.send({ type: 'ready', port, url: `http://127.0.0.1:${port}` });
-  } else {
-    console.log(`Server listening on http://127.0.0.1:${port}`);
-  }
-});
+// Start server after adapter is ready
+adapterPromise
+  .then(() => {
+    server.listen(0, '127.0.0.1', () => {
+      const addr = server.address() as any;
+      const port = addr.port;
+      if (process.send) {
+        process.send({ type: 'ready', port, url: `http://127.0.0.1:${port}` });
+      } else {
+        console.log(`Server listening on http://127.0.0.1:${port}`);
+      }
+    });
+  })
+  .catch((err) => {
+    console.error('Failed to initialize adapter:', err);
+    process.exit(1);
+  });

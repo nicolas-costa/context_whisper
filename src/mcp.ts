@@ -1,152 +1,251 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { 
+import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
   ListPromptsRequestSchema,
   GetPromptRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
+import { execFileSync } from 'child_process';
 import { z } from 'zod';
-import type Database from 'better-sqlite3';
+import type { DatabaseManager } from './db.js';
 import * as notes from './notes.js';
-import * as db from './db.js';
-import { detectContext, normalizeRepoUrl } from './context-detector.js';
-import { existsSync } from 'fs';
-import { join, dirname } from 'path';
-import { execSync } from 'child_process';
+import { normalizeRepoUrl } from './context-detector.js';
 import { startServer, stopServer } from './web/server.js';
+import { resolveActingAccount } from './accounts.js';
 
-// Helper function to validate required parameters
-function validateRequiredContext(params: {
-  repo_url?: string | null;
-}): { valid: boolean; error?: any; context?: { workspace: string; project: string; repo_url: string } } {
-  if (!params.repo_url) {
-    return {
-      valid: false,
-      error: {
-        ok: false,
-        error: 'Missing required parameter: repo_url',
-        details: {
-          rule: 'repo_url is required for all operations',
-          provided: { repo_url: params.repo_url || null },
-          solution: 'Obtain repo_url using: git config --get remote.origin.url',
-          examples: {
-            git_command: 'git config --get remote.origin.url',
-            tool_usage: {
-              upsert_note: {
-                repo_url: 'https://github.com/workspace/project.git',
-                topic: 'authentication',
-                body_md: '## Implementation...'
-              }
-            }
-          },
-        },
-      },
-    };
+function getGitRemoteOriginUrl(cwd: string): string | null {
+  try {
+    const out = execFileSync('git', ['-C', cwd, 'config', '--get', 'remote.origin.url'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const v = String(out).trim();
+    return v.length > 0 ? v : null;
+  } catch {
+    return null;
   }
+}
 
-  // Validate and normalize repo_url format
-  const normalized = normalizeRepoUrl(params.repo_url);
-  if (!normalized) {
-    return {
-      valid: false,
-      error: {
-        ok: false,
-        error: 'Invalid repo_url format',
-        details: {
-          provided_repo_url: params.repo_url,
-          reason: 'repo_url could not be normalized. It should be a valid git repository URL.',
-          solution: 'Provide a valid git repository URL obtained via: git config --get remote.origin.url',
-          examples: {
-            valid_formats: [
-              'https://github.com/workspace/project.git',
-              'https://github.com/workspace/project',
-              'git@github.com:workspace/project.git',
-            ],
-            how_to_get: 'Run: git config --get remote.origin.url in your project directory'
-          },
-        },
-      },
-    };
-  }
-
-  // Return derived context
+function errorResponse(error: string, details?: any) {
   return {
-    valid: true,
-    context: {
-      workspace: normalized.owner,
-      project: normalized.name,
-      repo_url: normalized.url,
-    }
+    ok: false,
+    error,
+    ...(details ? { details } : {}),
   };
 }
 
+function resolveRepoContextStrict(params: { repo_url: string; cwd: string }):
+  | {
+    workspace: string;
+    project: string;
+    repo_url: string;
+  }
+  | { error: any } {
+  const normalizedPayload = normalizeRepoUrl(params.repo_url);
+  if (!normalizedPayload) {
+    return {
+      error: errorResponse('Invalid repo_url format', { provided_repo_url: params.repo_url }),
+    };
+  }
 
-// Zod schemas for validation - repo_url is required, workspace/project derived automatically
+  const remote = getGitRemoteOriginUrl(params.cwd);
+  if (!remote) {
+    return {
+      error: errorResponse('Could not resolve git remote from cwd', {
+        cwd: params.cwd,
+        rule: 'cwd must be a git worktree with remote.origin.url configured',
+      }),
+    };
+  }
+
+  const normalizedRemote = normalizeRepoUrl(remote);
+  if (!normalizedRemote) {
+    return {
+      error: errorResponse('Invalid git remote URL in cwd', {
+        cwd: params.cwd,
+        remote_origin_url: remote,
+      }),
+    };
+  }
+
+  if (normalizedRemote.url !== normalizedPayload.url) {
+    return {
+      error: errorResponse('repo_url does not match git remote of cwd', {
+        cwd: params.cwd,
+        repo_url: params.repo_url,
+        git_remote_origin_url: remote,
+        normalized_repo_url: normalizedPayload.url,
+        normalized_git_remote_origin_url: normalizedRemote.url,
+      }),
+    };
+  }
+
+  return {
+    workspace: normalizedPayload.owner,
+    project: normalizedPayload.name,
+    repo_url: normalizedPayload.url,
+  };
+}
+
+function resolveEnvironmentForWorkspace(
+  dbManager: DatabaseManager,
+  repoWorkspace: string,
+  requestedEnv?: string
+): { envName: string } | { error: any } {
+  const defaultEnv = dbManager.getDefaultEnvironmentName();
+
+  if (requestedEnv) {
+    const cfg = dbManager.getEnvironmentConfig(requestedEnv);
+    if (!cfg) {
+      return { error: errorResponse(`Environment '${requestedEnv}' not configured`) };
+    }
+    if (
+      cfg.allowedWorkspaces &&
+      cfg.allowedWorkspaces.length > 0 &&
+      !cfg.allowedWorkspaces.includes(repoWorkspace)
+    ) {
+      return {
+        error: errorResponse(
+          `Workspace '${repoWorkspace}' is not allowed for environment '${requestedEnv}'`,
+          {
+            environment: requestedEnv,
+            workspace: repoWorkspace,
+            allowed_workspaces: cfg.allowedWorkspaces,
+          }
+        ),
+      };
+    }
+    return { envName: requestedEnv };
+  }
+
+  const matches: string[] = [];
+  for (const envName of dbManager.listEnvironments()) {
+    const cfg = dbManager.getEnvironmentConfig(envName);
+    if (!cfg?.allowedWorkspaces || cfg.allowedWorkspaces.length === 0) continue;
+    if (cfg.allowedWorkspaces.includes(repoWorkspace)) matches.push(envName);
+  }
+
+  if (matches.length === 1) return { envName: matches[0] };
+  if (matches.length > 1) {
+    return {
+      error: errorResponse(`Workspace '${repoWorkspace}' matches multiple environments`, {
+        workspace: repoWorkspace,
+        matching_environments: matches,
+      }),
+    };
+  }
+
+  // No explicit routing rule: fall back to default only if it allows (when allowlist is present)
+  const defCfg = dbManager.getEnvironmentConfig(defaultEnv);
+  if (
+    defCfg?.allowedWorkspaces &&
+    defCfg.allowedWorkspaces.length > 0 &&
+    !defCfg.allowedWorkspaces.includes(repoWorkspace)
+  ) {
+    return {
+      error: errorResponse(
+        `Workspace '${repoWorkspace}' is not allowed for default environment '${defaultEnv}'`,
+        {
+          workspace: repoWorkspace,
+          default_environment: defaultEnv,
+          allowed_workspaces: defCfg.allowedWorkspaces,
+        }
+      ),
+    };
+  }
+  return { envName: defaultEnv };
+}
+
+// Zod schemas for validation
 const UpsertNoteSchema = z.object({
+  environment: z.string().optional(),
+  cwd: z.string().min(1),
   repo_url: z.string(),
-  topic: z.string(),
-  subtopic: z.string().nullable().optional(),
+  topic: z.string().max(500),
+  subtopic: z.string().max(500).nullable().optional(),
   tags: z.array(z.string()).optional(),
-  body_md: z.string(),
+  // Prevent trivial DoS by sending massive payloads.
+  body_md: z.string().max(1_000_000),
   created_by: z.string().nullable().optional(),
-  review_status: z.enum(['DRAFT', 'APPROVED']).optional(),
-  links: z.array(z.object({
-    repo: z.string().nullable().optional(),
-    path: z.string().nullable().optional(),
-    symbol: z.string().nullable().optional(),
-    commit_sha: z.string().nullable().optional(),
-    line_start: z.number().nullable().optional(),
-    line_end: z.number().nullable().optional(),
-  })).optional(),
+  review_status: z.enum(['DRAFT']).optional(),
+  links: z
+    .array(
+      z.object({
+        repo: z.string().nullable().optional(),
+        path: z.string().nullable().optional(),
+        symbol: z.string().nullable().optional(),
+        commit_sha: z.string().nullable().optional(),
+        line_start: z.number().nullable().optional(),
+        line_end: z.number().nullable().optional(),
+      })
+    )
+    .optional(),
 });
 
 const GetNoteSchema = z.object({
+  environment: z.string().optional(),
+  cwd: z.string().min(1),
   repo_url: z.string(),
-  topic: z.string(),
-  subtopic: z.string().nullable().optional(),
+  topic: z.string().max(500),
+  subtopic: z.string().max(500).nullable().optional(),
 });
 
-const SearchNotesSchema = z.object({
-  query: z.string(),
-  repo_url: z.string().optional(), // Optional for global search
-  top_k: z.number().int().positive().optional(),
-  tags: z.array(z.string()).optional(),
-  review_status: z.string().nullable().optional(),
-  workspace: z.string().optional(), // Derived from repo_url if provided
-  project: z.string().optional(), // Derived from repo_url if provided
-});
+const SearchNotesSchema = z
+  .object({
+    environment: z.string().optional(),
+    cwd: z.string().min(1).optional(),
+    query: z.string(),
+    repo_url: z.string().optional(),
+    top_k: z.number().int().positive().optional(),
+    tags: z.array(z.string()).optional(),
+    review_status: z.enum(['DRAFT', 'APPROVED']).nullable().optional(),
+  })
+  .refine((data) => !data.repo_url || data.cwd, {
+    message: 'cwd is required when repo_url is provided',
+    path: ['cwd'],
+  });
 
 const ListTopicsSchema = z.object({
+  environment: z.string().optional(),
+  cwd: z.string().min(1),
   repo_url: z.string(),
 });
 
 const DeleteNoteSchema = z.object({
+  environment: z.string().optional(),
+  cwd: z.string().min(1),
   repo_url: z.string(),
-  topic: z.string(),
-  subtopic: z.string().nullable().optional(),
+  topic: z.string().max(500),
+  subtopic: z.string().max(500).nullable().optional(),
+});
+
+const HealthSchema = z.object({
+  environment: z.string().optional(),
 });
 
 const ServeNotesUISchema = z.object({
-  // No params required, but we can allow optional workspace/project to seed the UI context if desired?
-  // For now, let's keep it simple.
+  environment: z.string().optional(),
+  cwd: z.string().min(1),
 });
-
-const StopNotesServerSchema = z.object({});
 
 const SYSTEM_PROMPT = `REGRAS DE DOCUMENTAÇÃO TÉCNICA:
 
 - Para registrar decisões técnicas, arquitetura, padrões de código ou conhecimento do projeto, prefira usar a tool 'upsert_note'.
-- Evite criar novos arquivos .md no sistema de arquivos do projeto. Exceções permitidas:
-  * Atualizar README.md e outros arquivos .md existentes no projeto
-  * Manter arquivos de changelog ou release notes quando já existem no projeto
+- Evite criar novos arquivos .md no sistema de arquivos do projeto.
 - O repositório de notas permite busca vetorial semântica, rastreabilidade com código-fonte e compartilhamento entre membros da equipe.
+
+AMBIENTES DE BANCO DE DADOS:
+
+- O context-whisper suporta múltiplos ambientes de banco de dados (ex: LOCAL, ACME_CORP, STARTUP_XYZ).
+- Use o parâmetro 'environment' para especificar qual ambiente consultar.
+- Se não especificado, usa o ambiente padrão configurado.
+- Exemplo: "verifique nas notas técnicas do ambiente ACME sobre autenticação" → use environment: "ACME"
 
 REQUISITO OBRIGATÓRIO - REPOSITÓRIO GIT:
 
-- **IMPORTANTE**: Todas as ferramentas do context-whisper operam por repositório Git específico.
+- **IMPORTANTE**: Todas as ferramentas operam por repositório Git específico.
 - **VOCÊ DEVE sempre fornecer 'repo_url'** obtido via: git config --get remote.origin.url
 - **Workspace e project são derivados automaticamente** da repo_url fornecida
-- **Se você não conseguir obter a URL do repositório via Git, as ferramentas retornarão erro**
 
 Use 'upsert_note' quando:
   * Documentar decisões arquiteturais ou técnicas
@@ -155,76 +254,68 @@ Use 'upsert_note' quando:
   * Criar guias de uso de APIs ou módulos internos
 
 DICAS PARA upsert_note:
-- Sempre forneça 'created_by' no formato: "git_user_name (agent_name)" - ex: "João Silva (claude-sonnet)"
-- Obtenha git_user_name via: git config user.name
-- Use 'review_status: "DRAFT"' para decisões em desenvolvimento, "APPROVED" para decisões estabelecidas
-
-- Para consultar documentação existente, use 'search_notes' ou 'get_note'.
+- Sempre forneça 'created_by' no formato: "git_user_name (agent_name)"
+- upsert_note grava DRAFT. Nota estabelecida só entra por approve_note
 
 REFERÊNCIAS A CÓDIGO-FONTE INLINE:
 
-Ao documentar funcionalidades, decisões ou problemas técnicos, SEMPRE adicione links
-para o código-fonte relacionado diretamente no markdown usando a sintaxe:
-
+Ao documentar, adicione links para o código usando a sintaxe:
 [texto descritivo](code:caminho/arquivo.ext:linha_inicial-linha_final)
-
-Exemplos de uso:
-- ✅ **Autenticação JWT**: Sistema funcionando
-  [implementação](code:src/auth/middleware.ts:45-78)
-  
-- ✅ **Smart Contract TipRouter**: Modos FORWARD/HOLD
-  [contrato](code:contracts/TipRouter.sol:12-89)
-  
-- ❌ **Bug no SweepService**: API legada sem currency
-  [código problemático](code:src/services/SweepService.php:120-145)
-
-Variações opcionais:
-- [função validateJWT](code:src/auth.ts:12-25:symbol=validateJWT)
-- [commit abc123](code:src/service.php:45-120:commit=abc123)
-
-REGRAS:
-- Adicione links APÓS cada item que menciona código específico
-- Use linhas aproximadas se não souber exatamente (ex: 45-60)
-- Se não souber o arquivo exato, omita o link mas documente o problema
-- Links são extraídos automaticamente e vinculados à nota
-- Você pode também usar o campo 'links' explicitamente, mas prefira links inline no markdown
 
 CONSULTA DE CONTEXTO TÉCNICO:
 
-- Antes de analisar bugs, fazer refatorações ou implementar mudanças em um fluxo/funcionalidade, SEMPRE consulte primeiro o repositório de notas usando 'search_notes'.
-- Priorize buscar documentação técnica sobre decisões de implementação (ex: escolha de OAuth vs JWT, padrões de autenticação, estratégias de cache) mesmo que apenas decisões técnicas tenham sido documentadas, não detalhes de implementação.
-- O contexto de decisões técnicas ajuda a entender o "porquê" antes de analisar o "como" no código.
-- Use 'search_notes' com queries descritivas do domínio (ex: "autenticação", "fluxo de login", "jwt refresh") antes de examinar código-fonte.
-- Quando a busca retornar resultados relevantes, use 'get_note' para obter detalhes completos de uma nota específica.`;
+- Antes de analisar bugs ou fazer refatorações, SEMPRE consulte primeiro o repositório de notas usando 'search_notes'.
+- Use 'search_notes' com queries descritivas do domínio antes de examinar código-fonte.`;
 
-export function setupMCPServer(server: Server, database: Database.Database): void {
-  // Set system prompt
+export function setupMCPServer(server: Server, dbManager: DatabaseManager): void {
+  const availableEnvironments = dbManager.listEnvironments();
+  const defaultEnv = dbManager.getDefaultEnvironmentName();
+  const envDescription =
+    availableEnvironments.length > 1
+      ? `Database environment to use. Available: ${availableEnvironments.join(', ')}. Default: ${defaultEnv}`
+      : `Database environment (default: ${defaultEnv})`;
+
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     return {
       tools: [
         {
           name: 'upsert_note',
-          description: 'Cria ou atualiza uma nota técnica vetorizada. Use para registrar decisões arquiteturais, padrões de código, problemas conhecidos e soluções.',
+          description:
+            'Cria ou atualiza uma nota técnica vetorizada. Use para registrar decisões arquiteturais, padrões de código, problemas conhecidos e soluções.',
           inputSchema: {
             type: 'object',
             properties: {
+              cwd: {
+                type: 'string',
+                description:
+                  'REQUIRED. Local working directory of the git repository. Used to verify repo_url via git remote.',
+              },
+              environment: {
+                type: 'string',
+                description: envDescription,
+              },
               repo_url: {
                 type: 'string',
-                description: 'REQUIRED. Full git repository URL (e.g., https://github.com/user/repo.git). Obtain via: git config --get remote.origin.url in your project directory. Workspace and project will be automatically derived from this URL.'
+                description:
+                  'REQUIRED. Full git repository URL (e.g., https://github.com/user/repo.git). Obtain via: git config --get remote.origin.url',
               },
               topic: { type: 'string', description: 'Tópico principal da nota' },
               subtopic: { type: 'string', description: 'Subtópico opcional', nullable: true },
-              tags: { 
-                type: 'array', 
+              tags: {
+                type: 'array',
                 items: { type: 'string' },
-                description: 'Tags para categorização'
+                description: 'Tags para categorização',
               },
               body_md: { type: 'string', description: 'Conteúdo da nota em markdown' },
-              created_by: { type: 'string', description: 'Autor da nota. Formato: "git_user_name (agent_name)" - ex: "João Silva (claude-sonnet)"', nullable: true },
-              review_status: { 
-                type: 'string', 
-                enum: ['DRAFT', 'APPROVED'],
-                description: 'Status de revisão'
+              created_by: {
+                type: 'string',
+                description: 'Autor da nota. Formato: "git_user_name (agent_name)"',
+                nullable: true,
+              },
+              review_status: {
+                type: 'string',
+                enum: ['DRAFT'],
+                description: 'Somente DRAFT. Aprovação é a tool approve_note.',
               },
               links: {
                 type: 'array',
@@ -242,27 +333,7 @@ export function setupMCPServer(server: Server, database: Database.Database): voi
                 description: 'Links para código-fonte relacionado',
               },
             },
-            required: ['repo_url', 'topic', 'body_md'],
-            examples: [
-              {
-                description: 'Documenting an authentication decision',
-                value: {
-                  repo_url: 'https://github.com/username/repo.git',
-                  topic: 'Authentication System',
-                  created_by: 'João Silva (claude-sonnet)',
-                  body_md: '# JWT Implementation\n\nWe chose JWT over sessions for stateless authentication...',
-                },
-              },
-            ],
-            'x-hints': {
-              for_ai_agents: [
-                'Always provide repo_url if possible (obtain via: git config --get remote.origin.url)',
-                'If repo_url is provided, workspace and project will be derived automatically',
-                'workspace is typically the GitHub username or organization',
-                'project is typically the repository name',
-                'repo_url should be the full HTTPS URL to the repository',
-              ],
-            },
+            required: ['cwd', 'repo_url', 'topic', 'body_md'],
           },
         },
         {
@@ -271,39 +342,58 @@ export function setupMCPServer(server: Server, database: Database.Database): voi
           inputSchema: {
             type: 'object',
             properties: {
+              cwd: {
+                type: 'string',
+                description:
+                  'REQUIRED. Local working directory of the git repository. Used to verify repo_url via git remote.',
+              },
+              environment: {
+                type: 'string',
+                description: envDescription,
+              },
               repo_url: {
                 type: 'string',
-                description: 'REQUIRED. Full git repository URL where the note is stored.'
+                description: 'REQUIRED. Full git repository URL where the note is stored.',
               },
               topic: { type: 'string', description: 'Tópico da nota' },
               subtopic: { type: 'string', description: 'Subtópico opcional', nullable: true },
             },
-            required: ['repo_url', 'topic'],
+            required: ['cwd', 'repo_url', 'topic'],
           },
         },
         {
           name: 'search_notes',
-          description: 'Busca notas técnicas usando similaridade semântica vetorial. Busca global se repo_url não for especificado.',
+          description:
+            'Busca notas técnicas usando similaridade semântica vetorial. Se repo_url não for fornecido, busca em todos os repositórios (busca global).',
           inputSchema: {
             type: 'object',
             properties: {
+              cwd: {
+                type: 'string',
+                description:
+                  'REQUIRED when repo_url is provided. Local working directory of the git repository. Used to verify repo_url via git remote. Optional for global search (when repo_url is not provided).',
+              },
+              environment: {
+                type: 'string',
+                description: envDescription,
+              },
               query: { type: 'string', description: 'Query de busca semântica' },
               repo_url: {
                 type: 'string',
-                description: 'OPCIONAL. Filtrar por repositório específico. Se não fornecido, busca em todos os repositórios.',
-                nullable: true
+                description:
+                  'OPTIONAL. Filtrar por repositório específico. Se não fornecido, busca em todos os repositórios (busca global).',
               },
               top_k: { type: 'number', description: 'Número de resultados (padrão: 5)' },
               tags: {
                 type: 'array',
                 items: { type: 'string' },
-                description: 'Filtrar por tags'
+                description: 'Filtrar por tags',
               },
               review_status: {
                 type: 'string',
                 enum: ['DRAFT', 'APPROVED'],
                 description: 'Filtrar por status de revisão',
-                nullable: true
+                nullable: true,
               },
             },
             required: ['query'],
@@ -315,33 +405,117 @@ export function setupMCPServer(server: Server, database: Database.Database): voi
           inputSchema: {
             type: 'object',
             properties: {
+              cwd: {
+                type: 'string',
+                description:
+                  'REQUIRED. Local working directory of the git repository. Used to verify repo_url via git remote.',
+              },
+              environment: {
+                type: 'string',
+                description: envDescription,
+              },
               repo_url: {
                 type: 'string',
-                description: 'REQUIRED. Full git repository URL para listar tópicos.'
+                description: 'REQUIRED. Full git repository URL para listar tópicos.',
               },
             },
-            required: ['repo_url'],
+            required: ['cwd', 'repo_url'],
           },
         },
         {
           name: 'delete_note',
-          description: 'Remove uma nota técnica e todos os dados associados (vetor, links).',
+          description:
+            'Soft-delete de uma nota. A linha fica para auditoria, some da busca e o vetor é removido.',
           inputSchema: {
             type: 'object',
             properties: {
+              cwd: {
+                type: 'string',
+                description:
+                  'REQUIRED. Local working directory of the git repository. Used to verify repo_url via git remote.',
+              },
+              environment: {
+                type: 'string',
+                description: envDescription,
+              },
               repo_url: {
                 type: 'string',
-                description: 'REQUIRED. Full git repository URL onde a nota está armazenada.'
+                description: 'REQUIRED. Full git repository URL onde a nota está armazenada.',
               },
               topic: { type: 'string', description: 'Tópico da nota a ser removida' },
               subtopic: { type: 'string', description: 'Subtópico opcional', nullable: true },
             },
-            required: ['repo_url', 'topic'],
+            required: ['cwd', 'repo_url', 'topic'],
+          },
+        },
+        {
+          name: 'approve_note',
+          description:
+            'Marca uma nota viva como APPROVED. Exige conta tech_lead quando CONTEXT_WHISPER_ACCOUNT_TOKEN está definido.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              cwd: {
+                type: 'string',
+                description:
+                  'REQUIRED. Local working directory of the git repository. Used to verify repo_url via git remote.',
+              },
+              environment: {
+                type: 'string',
+                description: envDescription,
+              },
+              repo_url: {
+                type: 'string',
+                description: 'REQUIRED. Full git repository URL onde a nota está armazenada.',
+              },
+              topic: { type: 'string', description: 'Tópico da nota a aprovar' },
+              subtopic: { type: 'string', description: 'Subtópico opcional', nullable: true },
+            },
+            required: ['cwd', 'repo_url', 'topic'],
+          },
+        },
+        {
+          name: 'purge_note',
+          description:
+            'Apaga de vez uma nota já soft-deleted. Exige conta tech_lead quando CONTEXT_WHISPER_ACCOUNT_TOKEN está definido.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              cwd: {
+                type: 'string',
+                description:
+                  'REQUIRED. Local working directory of the git repository. Used to verify repo_url via git remote.',
+              },
+              environment: {
+                type: 'string',
+                description: envDescription,
+              },
+              repo_url: {
+                type: 'string',
+                description: 'REQUIRED. Full git repository URL onde a nota está armazenada.',
+              },
+              topic: { type: 'string', description: 'Tópico da nota já removida' },
+              subtopic: { type: 'string', description: 'Subtópico opcional', nullable: true },
+            },
+            required: ['cwd', 'repo_url', 'topic'],
           },
         },
         {
           name: 'health',
-          description: 'Verifica o status do banco de dados e extensão sqlite-vec.',
+          description: 'Verifica o status do banco de dados e conexões.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              environment: {
+                type: 'string',
+                description: envDescription,
+              },
+            },
+          },
+        },
+        {
+          name: 'list_environments',
+          description: 'Lista todos os ambientes de banco de dados configurados.',
           inputSchema: {
             type: 'object',
             properties: {},
@@ -349,15 +523,27 @@ export function setupMCPServer(server: Server, database: Database.Database): voi
         },
         {
           name: 'serve_notes_ui',
-          description: 'Inicia um servidor web local para visualização amigável das notas técnicas. Retorna a URL para acesso. O servidor encerra automaticamente após 10 minutos de inatividade.',
+          description:
+            'Inicia um servidor web local para visualização amigável das notas técnicas.',
           inputSchema: {
             type: 'object',
-            properties: {},
+            properties: {
+              cwd: {
+                type: 'string',
+                description:
+                  'REQUIRED. Local working directory of the git repository (used for repo path context).',
+              },
+              environment: {
+                type: 'string',
+                description: envDescription,
+              },
+            },
+            required: ['cwd'],
           },
         },
         {
           name: 'stop_notes_server',
-          description: 'Encerra o servidor web de visualização de notas imediatamente.',
+          description: 'Encerra o servidor web de visualização de notas.',
           inputSchema: {
             type: 'object',
             properties: {},
@@ -367,23 +553,21 @@ export function setupMCPServer(server: Server, database: Database.Database): voi
     };
   });
 
-  // Register prompts handler to expose system prompt
   server.setRequestHandler(ListPromptsRequestSchema, async () => {
     return {
       prompts: [
         {
           name: 'system_context_whisper',
-          description: 'System instructions for context-whisper MCP server - usage guidelines and auto-detection rules',
+          description: 'System instructions for context-whisper MCP server',
           arguments: [],
         },
       ],
     };
   });
 
-  // Handler to get the actual prompt content
   server.setRequestHandler(GetPromptRequestSchema, async (request) => {
     const { name } = request.params;
-    
+
     if (name === 'system_context_whisper') {
       return {
         description: 'System instructions for context-whisper MCP server',
@@ -398,7 +582,7 @@ export function setupMCPServer(server: Server, database: Database.Database): voi
         ],
       };
     }
-    
+
     return {
       isError: true,
       content: [
@@ -412,54 +596,62 @@ export function setupMCPServer(server: Server, database: Database.Database): voi
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
-    // Try to get cwd from environment variable first (may be set by the MCP client/IDE)
-    // Fallback to process.cwd() which is the server's working directory
-    const cwd = process.env.CONTEXT_WHISPER_CWD || 
-                 process.env.PWD || 
-                 process.env.CWD || 
-                 process.cwd();
 
     try {
       switch (name) {
         case 'upsert_note': {
           const rawParams = UpsertNoteSchema.parse(args);
-
-          // Validate required repo_url and derive workspace/project
-          const validation = validateRequiredContext({
+          const repoContext = resolveRepoContextStrict({
             repo_url: rawParams.repo_url,
+            cwd: rawParams.cwd,
           });
-
-          if (!validation.valid) {
+          if ('error' in repoContext) {
             return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify(validation.error, null, 2),
-                },
-              ],
+              content: [{ type: 'text', text: JSON.stringify(repoContext.error, null, 2) }],
               isError: true,
             };
           }
+          const envResolved = resolveEnvironmentForWorkspace(
+            dbManager,
+            repoContext.workspace,
+            rawParams.environment
+          );
+          if ('error' in envResolved) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify(envResolved.error, null, 2) }],
+              isError: true,
+            };
+          }
+          const adapter = await dbManager.getAdapter(envResolved.envName);
 
-          // Add derived context to params
           const paramsWithContext = {
             ...rawParams,
-            workspace: validation.context!.workspace,
-            project: validation.context!.project,
+            repo_url: repoContext.repo_url,
+            workspace: repoContext.workspace,
+            project: repoContext.project,
           };
 
-          const result = await notes.upsertNote(database, paramsWithContext as notes.UpsertNoteParams, cwd);
-          
-          // Return with context
+          const result = await notes.upsertNote(
+            adapter,
+            paramsWithContext as notes.UpsertNoteParams,
+            rawParams.cwd,
+            await resolveActingAccount(adapter)
+          );
+
           return {
             content: [
               {
                 type: 'text',
-                text: JSON.stringify({
-                  ok: true,
-                  context: result.context,
-                  note_id: result.note_id,
-                }, null, 2),
+                text: JSON.stringify(
+                  {
+                    ok: true,
+                    environment: envResolved.envName,
+                    context: result.context,
+                    note_id: result.note_id,
+                  },
+                  null,
+                  2
+                ),
               },
             ],
           };
@@ -467,50 +659,64 @@ export function setupMCPServer(server: Server, database: Database.Database): voi
 
         case 'get_note': {
           const rawParams = GetNoteSchema.parse(args);
-
-          // Validate required repo_url and derive workspace/project
-          const validation = validateRequiredContext({
+          const repoContext = resolveRepoContextStrict({
             repo_url: rawParams.repo_url,
+            cwd: rawParams.cwd,
           });
-
-          if (!validation.valid) {
+          if ('error' in repoContext) {
             return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify(validation.error, null, 2),
-                },
-              ],
+              content: [{ type: 'text', text: JSON.stringify(repoContext.error, null, 2) }],
               isError: true,
             };
           }
+          const envResolved = resolveEnvironmentForWorkspace(
+            dbManager,
+            repoContext.workspace,
+            rawParams.environment
+          );
+          if ('error' in envResolved) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify(envResolved.error, null, 2) }],
+              isError: true,
+            };
+          }
+          const adapter = await dbManager.getAdapter(envResolved.envName);
 
-          // Add derived context to params
           const paramsWithContext = {
             ...rawParams,
-            workspace: validation.context!.workspace,
-            project: validation.context!.project,
+            repo_url: repoContext.repo_url,
+            workspace: repoContext.workspace,
+            project: repoContext.project,
           };
 
-          const result = notes.getNote(database, paramsWithContext as notes.GetNoteParams, cwd);
-          
+          const result = await notes.getNote(
+            adapter,
+            paramsWithContext as notes.GetNoteParams,
+            rawParams.cwd,
+            await resolveActingAccount(adapter)
+          );
+
           if (!result.note) {
             return {
               content: [
                 {
                   type: 'text',
-                  text: JSON.stringify({
-                    ok: false,
-                    error: 'Note not found',
-                    context: result.context,
-                  }, null, 2),
+                  text: JSON.stringify(
+                    {
+                      ok: false,
+                      error: 'Note not found',
+                      environment: envResolved.envName,
+                      context: result.context,
+                    },
+                    null,
+                    2
+                  ),
                 },
               ],
               isError: true,
             };
           }
-          
-          // Parse tags_json back to array
+
           const noteWithParsedTags = {
             ...result.note,
             tags: result.note.tags_json ? JSON.parse(result.note.tags_json) : null,
@@ -521,11 +727,16 @@ export function setupMCPServer(server: Server, database: Database.Database): voi
             content: [
               {
                 type: 'text',
-                text: JSON.stringify({
-                  ok: true,
-                  context: result.context,
-                  note: noteWithParsedTags,
-                }, null, 2),
+                text: JSON.stringify(
+                  {
+                    ok: true,
+                    environment: envResolved.envName,
+                    context: result.context,
+                    note: noteWithParsedTags,
+                  },
+                  null,
+                  2
+                ),
               },
             ],
           };
@@ -534,95 +745,190 @@ export function setupMCPServer(server: Server, database: Database.Database): voi
         case 'search_notes': {
           const rawParams = SearchNotesSchema.parse(args);
 
-          let paramsWithContext = rawParams;
-
-          // If repo_url is provided, validate and derive workspace/project
           if (rawParams.repo_url) {
-            const validation = validateRequiredContext({
+            // repo_url fornecido: busca no repositório específico
+            // cwd é obrigatório neste caso (validado pelo schema refine)
+            const repoContext = resolveRepoContextStrict({
               repo_url: rawParams.repo_url,
+              cwd: rawParams.cwd!,
             });
-
-            if (!validation.valid) {
+            if ('error' in repoContext) {
               return {
-                content: [
-                  {
-                    type: 'text',
-                    text: JSON.stringify(validation.error, null, 2),
-                  },
-                ],
+                content: [{ type: 'text', text: JSON.stringify(repoContext.error, null, 2) }],
                 isError: true,
               };
             }
 
-            // Add derived context to params
-            paramsWithContext = {
+            const envResolved = resolveEnvironmentForWorkspace(
+              dbManager,
+              repoContext.workspace,
+              rawParams.environment
+            );
+            if ('error' in envResolved) {
+              return {
+                content: [{ type: 'text', text: JSON.stringify(envResolved.error, null, 2) }],
+                isError: true,
+              };
+            }
+            const adapter = await dbManager.getAdapter(envResolved.envName);
+
+            const paramsWithContext = {
               ...rawParams,
-              workspace: validation.context!.workspace,
-              project: validation.context!.project,
+              global: false,
+              repo_url: repoContext.repo_url,
+              workspace: repoContext.workspace,
+              project: repoContext.project,
             };
-          }
 
-          const result = await notes.searchNotes(database, paramsWithContext as notes.SearchNotesParams, cwd);
-          
-          // Parse tags_json for each result
-          const resultsWithParsedTags = result.notes.map((r) => ({
-            ...r,
-            tags: r.tags_json ? JSON.parse(r.tags_json) : null,
-            tags_json: undefined,
-          }));
+            const result = await notes.searchNotes(
+              adapter,
+              paramsWithContext as notes.SearchNotesParams,
+              rawParams.cwd!,
+              await resolveActingAccount(adapter)
+            );
 
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify({
-                  ok: true,
-                  context: result.context,
-                  notes: resultsWithParsedTags,
-                }, null, 2),
-              },
-            ],
-          };
-        }
+            const resultsWithParsedTags = result.notes.map((r) => ({
+              ...r,
+              tags: r.tags_json ? JSON.parse(r.tags_json) : null,
+              tags_json: undefined,
+            }));
 
-        case 'list_topics': {
-          const rawParams = ListTopicsSchema.parse(args);
-
-          // Validate required repo_url and derive workspace/project
-          const validation = validateRequiredContext({
-            repo_url: rawParams.repo_url,
-          });
-
-          if (!validation.valid) {
             return {
               content: [
                 {
                   type: 'text',
-                  text: JSON.stringify(validation.error, null, 2),
+                  text: JSON.stringify(
+                    {
+                      ok: true,
+                      environment: envResolved.envName,
+                      context: result.context,
+                      notes: resultsWithParsedTags,
+                    },
+                    null,
+                    2
+                  ),
                 },
               ],
+            };
+          } else {
+            // repo_url ausente: busca global (todos os repositórios)
+            // Resolver ambiente: se especificado, validar que existe; senão usar padrão
+            const envName = rawParams.environment || dbManager.getDefaultEnvironmentName();
+            if (rawParams.environment) {
+              const cfg = dbManager.getEnvironmentConfig(rawParams.environment);
+              if (!cfg) {
+                return {
+                  content: [
+                    {
+                      type: 'text',
+                      text: JSON.stringify(
+                        errorResponse(`Environment '${rawParams.environment}' not configured`),
+                        null,
+                        2
+                      ),
+                    },
+                  ],
+                  isError: true,
+                };
+              }
+            }
+
+            const adapter = await dbManager.getAdapter(envName);
+
+            const paramsWithContext = {
+              ...rawParams,
+              global: true,
+              repo_url: undefined,
+              workspace: undefined,
+              project: undefined,
+            };
+
+            const result = await notes.searchNotes(
+              adapter,
+              paramsWithContext as notes.SearchNotesParams,
+              rawParams.cwd || undefined,
+              await resolveActingAccount(adapter)
+            );
+
+            const resultsWithParsedTags = result.notes.map((r) => ({
+              ...r,
+              tags: r.tags_json ? JSON.parse(r.tags_json) : null,
+              tags_json: undefined,
+            }));
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(
+                    {
+                      ok: true,
+                      environment: envName,
+                      context: result.context,
+                      notes: resultsWithParsedTags,
+                    },
+                    null,
+                    2
+                  ),
+                },
+              ],
+            };
+          }
+        }
+
+        case 'list_topics': {
+          const rawParams = ListTopicsSchema.parse(args);
+          const repoContext = resolveRepoContextStrict({
+            repo_url: rawParams.repo_url,
+            cwd: rawParams.cwd,
+          });
+          if ('error' in repoContext) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify(repoContext.error, null, 2) }],
               isError: true,
             };
           }
+          const envResolved = resolveEnvironmentForWorkspace(
+            dbManager,
+            repoContext.workspace,
+            rawParams.environment
+          );
+          if ('error' in envResolved) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify(envResolved.error, null, 2) }],
+              isError: true,
+            };
+          }
+          const adapter = await dbManager.getAdapter(envResolved.envName);
 
-          // Add derived context to params
           const paramsWithContext = {
             ...rawParams,
-            workspace: validation.context!.workspace,
-            project: validation.context!.project,
+            repo_url: repoContext.repo_url,
+            workspace: repoContext.workspace,
+            project: repoContext.project,
           };
 
-          const result = notes.listTopics(database, paramsWithContext as notes.ListTopicsParams, cwd);
-          
+          const result = await notes.listTopics(
+            adapter,
+            paramsWithContext as notes.ListTopicsParams,
+            rawParams.cwd,
+            await resolveActingAccount(adapter)
+          );
+
           return {
             content: [
               {
                 type: 'text',
-                text: JSON.stringify({
-                  ok: true,
-                  context: result.context,
-                  topics: result.topics,
-                }, null, 2),
+                text: JSON.stringify(
+                  {
+                    ok: true,
+                    environment: envResolved.envName,
+                    context: result.context,
+                    topics: result.topics,
+                  },
+                  null,
+                  2
+                ),
               },
             ],
           };
@@ -630,88 +936,201 @@ export function setupMCPServer(server: Server, database: Database.Database): voi
 
         case 'delete_note': {
           const rawParams = DeleteNoteSchema.parse(args);
-
-          // Validate required repo_url and derive workspace/project
-          const validation = validateRequiredContext({
+          const repoContext = resolveRepoContextStrict({
             repo_url: rawParams.repo_url,
+            cwd: rawParams.cwd,
           });
-
-          if (!validation.valid) {
+          if ('error' in repoContext) {
             return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify(validation.error, null, 2),
-                },
-              ],
+              content: [{ type: 'text', text: JSON.stringify(repoContext.error, null, 2) }],
               isError: true,
             };
           }
+          const envResolved = resolveEnvironmentForWorkspace(
+            dbManager,
+            repoContext.workspace,
+            rawParams.environment
+          );
+          if ('error' in envResolved) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify(envResolved.error, null, 2) }],
+              isError: true,
+            };
+          }
+          const adapter = await dbManager.getAdapter(envResolved.envName);
 
-          // Add derived context to params
           const paramsWithContext = {
             ...rawParams,
-            workspace: validation.context!.workspace,
-            project: validation.context!.project,
+            repo_url: repoContext.repo_url,
+            workspace: repoContext.workspace,
+            project: repoContext.project,
           };
 
-          const result = notes.deleteNote(database, paramsWithContext as notes.DeleteNoteParams, cwd);
-          
+          const result = await notes.deleteNote(
+            adapter,
+            paramsWithContext as notes.DeleteNoteParams,
+            rawParams.cwd,
+            await resolveActingAccount(adapter)
+          );
+
           return {
             content: [
               {
                 type: 'text',
-                text: JSON.stringify({
-                  ok: true,
-                  context: result.context,
-                  deleted: result.deleted,
-                }, null, 2),
+                text: JSON.stringify(
+                  {
+                    ok: true,
+                    environment: envResolved.envName,
+                    context: result.context,
+                    deleted: result.deleted,
+                    ...(result.vector_deleted === undefined
+                      ? {}
+                      : { vector_deleted: result.vector_deleted }),
+                    ...(result.warnings?.length ? { warnings: result.warnings } : {}),
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+          };
+        }
+
+        case 'approve_note': {
+          const rawParams = DeleteNoteSchema.parse(args);
+          const repoContext = resolveRepoContextStrict({
+            repo_url: rawParams.repo_url,
+            cwd: rawParams.cwd,
+          });
+          if ('error' in repoContext) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify(repoContext.error, null, 2) }],
+              isError: true,
+            };
+          }
+          const envResolved = resolveEnvironmentForWorkspace(
+            dbManager,
+            repoContext.workspace,
+            rawParams.environment
+          );
+          if ('error' in envResolved) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify(envResolved.error, null, 2) }],
+              isError: true,
+            };
+          }
+          const adapter = await dbManager.getAdapter(envResolved.envName);
+          const result = await notes.approveNote(
+            adapter,
+            {
+              ...rawParams,
+              repo_url: repoContext.repo_url,
+              workspace: repoContext.workspace,
+              project: repoContext.project,
+            } as notes.DeleteNoteParams,
+            rawParams.cwd,
+            await resolveActingAccount(adapter)
+          );
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(
+                  {
+                    ok: result.note !== null,
+                    environment: envResolved.envName,
+                    context: result.context,
+                    note_id: result.note?.note_id ?? null,
+                    review_status: result.note?.review_status ?? null,
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+          };
+        }
+
+        case 'purge_note': {
+          const rawParams = DeleteNoteSchema.parse(args);
+          const repoContext = resolveRepoContextStrict({
+            repo_url: rawParams.repo_url,
+            cwd: rawParams.cwd,
+          });
+          if ('error' in repoContext) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify(repoContext.error, null, 2) }],
+              isError: true,
+            };
+          }
+          const envResolved = resolveEnvironmentForWorkspace(
+            dbManager,
+            repoContext.workspace,
+            rawParams.environment
+          );
+          if ('error' in envResolved) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify(envResolved.error, null, 2) }],
+              isError: true,
+            };
+          }
+          const adapter = await dbManager.getAdapter(envResolved.envName);
+          const result = await notes.purgeNote(
+            adapter,
+            {
+              ...rawParams,
+              repo_url: repoContext.repo_url,
+              workspace: repoContext.workspace,
+              project: repoContext.project,
+            } as notes.DeleteNoteParams,
+            rawParams.cwd,
+            await resolveActingAccount(adapter)
+          );
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(
+                  {
+                    ok: true,
+                    environment: envResolved.envName,
+                    context: result.context,
+                    purged: result.deleted,
+                  },
+                  null,
+                  2
+                ),
               },
             ],
           };
         }
 
         case 'health': {
+          const rawParams = HealthSchema.parse(args);
+
           try {
-            const version = db.getSchemaVersion(database);
-            
-            // Check if vec0 extension is loaded by attempting to use it
-            let vecExtensionLoaded = false;
-            let vecExtensionError: string | null = null;
-            try {
-              // Try to use vec0 module to verify it's loaded
-              database.exec('SELECT 1 FROM (SELECT vec_version()) LIMIT 1');
-              vecExtensionLoaded = true;
-            } catch (vecError) {
-              vecExtensionError = vecError instanceof Error ? vecError.message : String(vecError);
-              // Fallback: check if note_vectors table exists and is accessible
-              try {
-                const tableCheck = database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='note_vectors'").get();
-                if (tableCheck) {
-                  // Try a simple SELECT to see if table works
-                  database.prepare('SELECT COUNT(*) FROM note_vectors LIMIT 1').get();
-                  vecExtensionLoaded = true; // Table exists and works
-                }
-              } catch {
-                // vec0 not properly loaded
-                vecExtensionLoaded = false;
-              }
-            }
-            
-            const context = detectContext(undefined, cwd);
+            const adapter = await dbManager.getAdapter(rawParams.environment);
+            const health = await adapter.isHealthy();
+            const envName = rawParams.environment || dbManager.getDefaultEnvironmentName();
+            const config = dbManager.getEnvironmentConfig(envName);
+
             return {
               content: [
                 {
                   type: 'text',
-                  text: JSON.stringify({
-                    ok: true,
-                    status: vecExtensionLoaded ? 'healthy' : 'degraded',
-                    schema_version: version,
-                    vec_extension_loaded: vecExtensionLoaded,
-                    vec_extension_error: vecExtensionError || undefined,
-                    vector_search_available: vecExtensionLoaded,
-                    context,
-                  }, null, 2),
+                  text: JSON.stringify(
+                    {
+                      ok: true,
+                      environment: envName,
+                      status: health.relational && health.vector ? 'healthy' : 'degraded',
+                      relational_healthy: health.relational,
+                      vector_healthy: health.vector,
+                      database_type: config?.relational.type,
+                      vector_type: config?.vector.type,
+                    },
+                    null,
+                    2
+                  ),
                 },
               ],
             };
@@ -720,11 +1139,15 @@ export function setupMCPServer(server: Server, database: Database.Database): voi
               content: [
                 {
                   type: 'text',
-                  text: JSON.stringify({
-                    ok: false,
-                    status: 'unhealthy',
-                    error: error instanceof Error ? error.message : String(error),
-                  }, null, 2),
+                  text: JSON.stringify(
+                    {
+                      ok: false,
+                      status: 'unhealthy',
+                      error: error instanceof Error ? error.message : String(error),
+                    },
+                    null,
+                    2
+                  ),
                 },
               ],
               isError: true,
@@ -732,22 +1155,114 @@ export function setupMCPServer(server: Server, database: Database.Database): voi
           }
         }
 
-        case 'serve_notes_ui': {
-          const url = await startServer({
-            database,
-            cwd
+        case 'list_environments': {
+          const environments = dbManager.listEnvironments();
+          const defaultEnv = dbManager.getDefaultEnvironmentName();
+
+          const envDetails = environments.map((env) => {
+            const config = dbManager.getEnvironmentConfig(env);
+            return {
+              name: env,
+              is_default: env === defaultEnv,
+              relational_type: config?.relational.type,
+              vector_type: config?.vector.type,
+            };
           });
-          
+
           return {
             content: [
               {
                 type: 'text',
-                text: JSON.stringify({
-                  ok: true,
-                  url,
-                  message: 'Web UI server started. Navigate to the URL to view notes.',
-                  auto_shutdown: 'Server will shutdown after 10 minutes of inactivity.'
-                }, null, 2),
+                text: JSON.stringify(
+                  {
+                    ok: true,
+                    environments: envDetails,
+                    default_environment: defaultEnv,
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+          };
+        }
+
+        case 'serve_notes_ui': {
+          const rawParams = ServeNotesUISchema.parse(args);
+          // Environment-scoped UI: infer routing from the repo at cwd (git remote owner -> workspace).
+          const remote = getGitRemoteOriginUrl(rawParams.cwd);
+          if (!remote) {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(
+                    errorResponse('Could not resolve git remote from cwd', {
+                      cwd: rawParams.cwd,
+                      rule: 'cwd must be a git worktree with remote.origin.url configured',
+                    }),
+                    null,
+                    2
+                  ),
+                },
+              ],
+              isError: true,
+            };
+          }
+          const normalizedRemote = normalizeRepoUrl(remote);
+          if (!normalizedRemote) {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(
+                    errorResponse('Invalid git remote URL in cwd', {
+                      cwd: rawParams.cwd,
+                      remote_origin_url: remote,
+                    }),
+                    null,
+                    2
+                  ),
+                },
+              ],
+              isError: true,
+            };
+          }
+
+          const envResolved = resolveEnvironmentForWorkspace(
+            dbManager,
+            normalizedRemote.owner,
+            rawParams.environment
+          );
+          if ('error' in envResolved) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify(envResolved.error, null, 2) }],
+              isError: true,
+            };
+          }
+
+          const adapter = await dbManager.getAdapter(envResolved.envName);
+
+          const url = await startServer({
+            adapter,
+            cwd: rawParams.cwd,
+          });
+
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(
+                  {
+                    ok: true,
+                    environment: envResolved.envName,
+                    url,
+                    message: 'Web UI server started. Navigate to the URL to view notes.',
+                    auto_shutdown: 'Server will shutdown after 10 minutes of inactivity.',
+                  },
+                  null,
+                  2
+                ),
               },
             ],
           };
@@ -755,15 +1270,19 @@ export function setupMCPServer(server: Server, database: Database.Database): voi
 
         case 'stop_notes_server': {
           await stopServer();
-          
+
           return {
             content: [
               {
                 type: 'text',
-                text: JSON.stringify({
-                  ok: true,
-                  message: 'Web UI server stopped.'
-                }, null, 2),
+                text: JSON.stringify(
+                  {
+                    ok: true,
+                    message: 'Web UI server stopped.',
+                  },
+                  null,
+                  2
+                ),
               },
             ],
           };
@@ -786,10 +1305,14 @@ export function setupMCPServer(server: Server, database: Database.Database): voi
           content: [
             {
               type: 'text',
-              text: JSON.stringify({
-                error: 'Validation error',
-                details: error.errors,
-              }, null, 2),
+              text: JSON.stringify(
+                {
+                  error: 'Validation error',
+                  details: error.errors,
+                },
+                null,
+                2
+              ),
             },
           ],
           isError: true,
@@ -800,9 +1323,13 @@ export function setupMCPServer(server: Server, database: Database.Database): voi
         content: [
           {
             type: 'text',
-            text: JSON.stringify({
-              error: error instanceof Error ? error.message : String(error),
-            }, null, 2),
+            text: JSON.stringify(
+              {
+                error: error instanceof Error ? error.message : String(error),
+              },
+              null,
+              2
+            ),
           },
         ],
         isError: true,
@@ -814,4 +1341,3 @@ export function setupMCPServer(server: Server, database: Database.Database): voi
 export function getSystemPrompt(): string {
   return SYSTEM_PROMPT;
 }
-
